@@ -14,6 +14,7 @@ HTTP Forwarding Server - HTTP 转发服务器
 - SQLite 持久化存储
 - Web Dashboard 看板
 - 后台运行与进程守护
+- Linux systemd 服务支持
 """
 
 import argparse
@@ -26,6 +27,7 @@ import signal
 import time
 import traceback
 import subprocess
+import shutil
 from datetime import datetime
 
 from utils.colors import Colors
@@ -49,6 +51,8 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 _server = None
 _shutdown_requested = False
 PID_FILE = 'proxy.pid'
+SERVICE_NAME = 'http-proxy'
+SERVICE_FILE = f'/etc/systemd/system/{SERVICE_NAME}.service'
 
 
 def signal_handler(signum, frame):
@@ -126,6 +130,126 @@ def stop_server():
         return False
 
 
+def get_script_path():
+    """获取脚本绝对路径"""
+    return os.path.abspath(__file__)
+
+
+def get_working_dir():
+    """获取工作目录"""
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def install_service(args):
+    """安装 systemd 服务"""
+    # 检查是否有 root 权限
+    if os.geteuid() != 0:
+        print(f"{Colors.RED}错误: 需要 root 权限，请使用 sudo{Colors.RESET}")
+        return False
+
+    script_path = get_script_path()
+    working_dir = get_working_dir()
+    python_path = sys.executable
+
+    # 构建 systemd 服务文件
+    service_content = f"""[Unit]
+Description=HTTP Proxy Logger
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory={working_dir}
+ExecStart={python_path} {script_path} start --enable-log-file
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+    # 写入服务文件
+    try:
+        with open(SERVICE_FILE, 'w') as f:
+            f.write(service_content)
+        print(f"{Colors.GREEN}✓{Colors.RESET} 服务文件已创建: {SERVICE_FILE}")
+
+        # 重载 systemd
+        subprocess.run(['systemctl', 'daemon-reload'], check=True)
+        print(f"{Colors.GREEN}✓{Colors.RESET} systemd 配置已重载")
+
+        # 启用服务
+        subprocess.run(['systemctl', 'enable', SERVICE_NAME], check=True)
+        print(f"{Colors.GREEN}✓{Colors.RESET} 服务已设置为开机自启")
+
+        # 启动服务
+        subprocess.run(['systemctl', 'start', SERVICE_NAME], check=True)
+        print(f"{Colors.GREEN}✓{Colors.RESET} 服务已启动")
+
+        print(f"\n{Colors.CYAN}服务管理命令:{Colors.RESET}")
+        print(f"  查看状态: sudo systemctl status {SERVICE_NAME}")
+        print(f"  查看日志: sudo journalctl -u {SERVICE_NAME} -f")
+        print(f"  停止服务: sudo systemctl stop {SERVICE_NAME}")
+        print(f"  卸载服务: sudo python {script_path} uninstall")
+
+        return True
+
+    except subprocess.CalledProcessError as e:
+        print(f"{Colors.RED}安装失败: {e}{Colors.RESET}")
+        return False
+    except Exception as e:
+        print(f"{Colors.RED}安装失败: {e}{Colors.RESET}")
+        return False
+
+
+def uninstall_service():
+    """卸载 systemd 服务"""
+    # 检查是否有 root 权限
+    if os.geteuid() != 0:
+        print(f"{Colors.RED}错误: 需要 root 权限，请使用 sudo{Colors.RESET}")
+        return False
+
+    try:
+        # 停止服务
+        result = subprocess.run(['systemctl', 'is-active', SERVICE_NAME],
+                                capture_output=True, text=True)
+        if result.returncode == 0:
+            subprocess.run(['systemctl', 'stop', SERVICE_NAME], check=True)
+            print(f"{Colors.GREEN}✓{Colors.RESET} 服务已停止")
+
+        # 禁用服务
+        result = subprocess.run(['systemctl', 'is-enabled', SERVICE_NAME],
+                                capture_output=True, text=True)
+        if result.returncode == 0:
+            subprocess.run(['systemctl', 'disable', SERVICE_NAME], check=True)
+            print(f"{Colors.GREEN}✓{Colors.RESET} 已取消开机自启")
+
+        # 删除服务文件
+        if os.path.exists(SERVICE_FILE):
+            os.remove(SERVICE_FILE)
+            print(f"{Colors.GREEN}✓{Colors.RESET} 服务文件已删除")
+
+        # 重载 systemd
+        subprocess.run(['systemctl', 'daemon-reload'], check=True)
+        print(f"{Colors.GREEN}✓{Colors.RESET} systemd 配置已重载")
+
+        print(f"\n{Colors.GREEN}服务已完全卸载{Colors.RESET}")
+        return True
+
+    except subprocess.CalledProcessError as e:
+        print(f"{Colors.YELLOW}警告: {e}{Colors.RESET}")
+        # 继续尝试删除文件
+        if os.path.exists(SERVICE_FILE):
+            os.remove(SERVICE_FILE)
+            print(f"{Colors.GREEN}✓{Colors.RESET} 服务文件已删除")
+        return True
+    except Exception as e:
+        print(f"{Colors.RED}卸载失败: {e}{Colors.RESET}")
+        return False
+
+
 def run_server(args):
     """运行服务器"""
     global _server
@@ -197,6 +321,13 @@ def daemon_main(args):
             run_server(args)
         except KeyboardInterrupt:
             break
+        except OSError as e:
+            # 端口占用等错误不重试
+            if e.errno == 98:  # Address already in use
+                print(f"\n{Colors.RED}[Daemon] 端口 {args.port} 已被占用，无法启动{Colors.RESET}")
+                remove_pid()
+                sys.exit(1)
+            raise
         except Exception as e:
             restart_count += 1
             print(f"\n{Colors.RED}[Daemon] 服务异常退出: {e}{Colors.RESET}")
@@ -250,25 +381,27 @@ Dashboard:
   访问 http://127.0.0.1:3420 查看请求看板
 
 命令:
-  start       启动服务（默认命令，可省略）
+  start       启动服务（后台运行，自动重启）
   stop        停止服务
   status      查看服务状态
+  install     安装 Linux 系统服务（开机自启）
+  uninstall   卸载 Linux 系统服务
 
 示例:
-  %(prog)s                           # 启动服务
-  %(prog)s start                     # 启动服务
+  %(prog)s                           # 启动服务（后台）
   %(prog)s stop                      # 停止服务
   %(prog)s status                    # 查看状态
+  %(prog)s install                   # 安装系统服务
+  %(prog)s uninstall                 # 卸载系统服务
   %(prog)s -p 8080                   # 指定端口启动
-  %(prog)s --no-web                  # 禁用 Dashboard 启动
         """
     )
     parser.add_argument(
         'command',
         nargs='?',
         default='start',
-        choices=['start', 'stop', 'status'],
-        help='命令: start(启动), stop(停止), status(状态)'
+        choices=['start', 'stop', 'status', 'install', 'uninstall'],
+        help='命令: start(启动), stop(停止), status(状态), install(安装服务), uninstall(卸载服务)'
     )
     parser.add_argument(
         '-p', '--port',
@@ -359,6 +492,12 @@ Dashboard:
 
     elif args.command == 'start':
         start_daemon(args)
+
+    elif args.command == 'install':
+        install_service(args)
+
+    elif args.command == 'uninstall':
+        uninstall_service()
 
 
 if __name__ == '__main__':

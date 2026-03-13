@@ -78,7 +78,7 @@ curl -X POST -d '{"name":"test"}' \
 ## 命令管理
 
 ```bash
-# 启动服务
+# 启动服务（后台运行）
 python proxy_server.py [start]
 
 # 停止服务
@@ -86,6 +86,33 @@ python proxy_server.py stop
 
 # 查看状态
 python proxy_server.py status
+
+# 安装为 Linux 系统服务（开机自启）
+sudo python proxy_server.py install
+
+# 卸载系统服务
+sudo python proxy_server.py uninstall
+```
+
+### Linux 系统服务
+
+安装后服务会自动启动并设置开机自启：
+
+```bash
+# 安装服务
+sudo python proxy_server.py install
+
+# 服务管理
+sudo systemctl status http-proxy   # 查看状态
+sudo systemctl start http-proxy    # 启动
+sudo systemctl stop http-proxy     # 停止
+sudo systemctl restart http-proxy  # 重启
+
+# 查看日志
+sudo journalctl -u http-proxy -f
+
+# 卸载服务
+sudo python proxy_server.py uninstall
 ```
 
 ## Dashboard 看板
