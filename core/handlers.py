@@ -6,6 +6,7 @@ import ssl
 import socket
 import re
 import time
+import traceback
 from io import BytesIO
 from urllib.parse import urlparse
 from datetime import datetime
@@ -248,19 +249,31 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
         except http.client.HTTPException as e:
             self._log_error(method, full_url, str(e))
             if not self.headers_sent:
-                self.send_error(502, f'Bad Gateway: {e}')
+                try:
+                    self.send_error(502, f'Bad Gateway: {e}')
+                except:
+                    pass
         except socket.timeout as e:
             self._log_error(method, full_url, f'Connection timeout: {e}')
             if not self.headers_sent:
-                self.send_error(504, f'Gateway Timeout: {e}')
+                try:
+                    self.send_error(504, f'Gateway Timeout: {e}')
+                except:
+                    pass
         except (socket.error, ConnectionError, OSError) as e:
             self._log_error(method, full_url, f'Connection error: {e}')
             if not self.headers_sent:
-                self.send_error(502, f'Bad Gateway: Connection failed - {e}')
+                try:
+                    self.send_error(502, f'Bad Gateway: Connection failed - {e}')
+                except:
+                    pass
         except Exception as e:
-            self._log_error(method, full_url, str(e))
+            self._log_error(method, full_url, f'{e}\n{traceback.format_exc()}')
             if not self.headers_sent:
-                self.send_error(500, f'Internal Error: {e}')
+                try:
+                    self.send_error(500, f'Internal Error: {e}')
+                except:
+                    pass
         finally:
             if conn:
                 try:

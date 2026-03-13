@@ -39,8 +39,14 @@ Dashboard 自动识别并脱敏敏感请求头：
 git clone <repo-url>
 cd http-proxy
 
-# 启动服务器
+# 启动服务（后台运行，自动重启）
 python proxy_server.py
+
+# 查看状态
+python proxy_server.py status
+
+# 停止服务
+python proxy_server.py stop
 ```
 
 启动后：
@@ -68,6 +74,19 @@ curl -X POST -d '{"name":"test"}' \
 ```
 
 所有请求自动记录到数据库，可在 Dashboard 中查看。
+
+## 命令管理
+
+```bash
+# 启动服务
+python proxy_server.py [start]
+
+# 停止服务
+python proxy_server.py stop
+
+# 查看状态
+python proxy_server.py status
+```
 
 ## Dashboard 看板
 
@@ -110,6 +129,7 @@ curl -X POST -d '{"name":"test"}' \
 | `--log-file` | 日志文件路径 | logs/proxy.log |
 | `--db-file` | 数据库文件路径 | data/proxy.db |
 | `--no-color` | 禁用终端颜色输出 | - |
+| `--restart-delay` | 自动重启延迟秒数 | 3 |
 
 ### 使用示例
 
@@ -120,8 +140,11 @@ python proxy_server.py
 # Dashboard 对外开放
 python proxy_server.py --web-host 0.0.0.0 --web-port 8080
 
-# 启用日志文件（同时保存到数据库）
+# 启用日志文件
 python proxy_server.py --enable-log-file
+
+# 生产环境推荐配置
+python proxy_server.py --enable-log-file --web-host 0.0.0.0
 
 # 仅代理功能，无 Dashboard
 python proxy_server.py --no-web
@@ -129,6 +152,45 @@ python proxy_server.py --no-web
 # 自定义端口和数据存储
 python proxy_server.py -p 8080 --db-file /var/data/proxy.db
 ```
+
+## 稳定性特性
+
+### 后台运行
+
+服务默认在后台运行，终端关闭不影响服务：
+
+```bash
+# 启动后可关闭终端
+python proxy_server.py
+
+# 通过命令管理
+python proxy_server.py status  # 查看状态
+python proxy_server.py stop    # 停止服务
+```
+
+### 进程守护/自动重启
+
+服务默认启用进程守护：
+
+- 服务崩溃后自动重启
+- 显示重启次数和错误信息
+- 支持自定义重启延迟 (`--restart-delay`)
+- PID 文件记录进程 ID (`proxy.pid`)
+
+### 异常自动恢复
+
+- 所有请求异常被捕获，不会导致服务崩溃
+- 记录完整堆栈信息便于排查问题
+- 单个请求失败不影响其他请求处理
+
+### 内置保护机制
+
+| 机制 | 说明 |
+|------|------|
+| 连接超时 | 60 秒超时，防止请求卡住 |
+| 自动重试 | 连接失败自动重试 3 次 |
+| 资源清理 | 连接关闭后自动释放资源 |
+| 端口复用 | `allow_reuse_address` 避免端口占用 |
 
 ## API 接口
 
