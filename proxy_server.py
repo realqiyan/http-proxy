@@ -445,8 +445,8 @@ Dashboard:
     )
     parser.add_argument(
         '--log-file',
-        default='logs/proxy.log',
-        help='日志文件路径 (默认: logs/proxy.log)'
+        default=None,
+        help='日志文件路径 (默认: ~/.http-proxy/logs/proxy.log)'
     )
     parser.add_argument(
         '--enable-log-file',
@@ -455,8 +455,8 @@ Dashboard:
     )
     parser.add_argument(
         '--db-file',
-        default='data/proxy.db',
-        help='数据库文件路径 (默认: data/proxy.db)'
+        default=None,
+        help='数据库文件路径 (默认: ~/.http-proxy/data/proxy.db)'
     )
     parser.add_argument(
         '--restart-delay',
@@ -466,6 +466,13 @@ Dashboard:
     )
 
     args = parser.parse_args()
+
+    # 设置默认数据目录
+    default_dir = os.path.expanduser('~/.http-proxy')
+    if args.db_file is None:
+        args.db_file = os.path.join(default_dir, 'data/proxy.db')
+    if args.log_file is None:
+        args.log_file = os.path.join(default_dir, 'logs/proxy.log')
 
     # 禁用颜色
     if args.no_color:

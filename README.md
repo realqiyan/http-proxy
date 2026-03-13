@@ -117,14 +117,24 @@ sudo python proxy_server.py uninstall
 
 ### 数据持久化
 
-默认数据存储在脚本目录下，移动目录会导致数据丢失。建议使用绝对路径：
+数据默认存储在 `~/.http-proxy/` 目录，切换目录不影响数据：
+
+```
+~/.http-proxy/
+├── data/
+│   └── proxy.db      # 数据库
+└── logs/
+    └── proxy.log     # 日志文件（启用时）
+```
+
+也可自定义路径：
 
 ```bash
-# 推荐配置：使用固定数据目录
-python proxy_server.py --db-file /var/lib/http-proxy/proxy.db --log-file /var/log/http-proxy/proxy.log
+# 自定义数据目录
+python proxy_server.py --db-file /var/lib/http-proxy/proxy.db
 
-# 安装为服务时同样指定
-sudo python proxy_server.py install --db-file /var/lib/http-proxy/proxy.db --log-file /var/log/http-proxy/proxy.log
+# 安装服务时同样指定
+sudo python proxy_server.py install --db-file /var/lib/http-proxy/proxy.db
 ```
 
 安装服务时会保存当前的配置参数。
@@ -167,8 +177,8 @@ sudo python proxy_server.py install --db-file /var/lib/http-proxy/proxy.db --log
 | `--web-host` | Dashboard 绑定地址 | 127.0.0.1 |
 | `--web-port` | Dashboard 看板端口 | 3420 |
 | `--enable-log-file` | 启用日志文件输出 | 默认关闭 |
-| `--log-file` | 日志文件路径 | logs/proxy.log |
-| `--db-file` | 数据库文件路径 | data/proxy.db |
+| `--log-file` | 日志文件路径 | ~/.http-proxy/logs/proxy.log |
+| `--db-file` | 数据库文件路径 | ~/.http-proxy/data/proxy.db |
 | `--no-color` | 禁用终端颜色输出 | - |
 | `--restart-delay` | 自动重启延迟秒数 | 3 |
 
