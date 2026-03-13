@@ -117,15 +117,19 @@ sudo python proxy_server.py uninstall
 
 ### 数据持久化
 
-数据默认存储在 `~/.http-proxy/` 目录，切换目录不影响数据：
+所有数据和配置存储在 `~/.http-proxy/` 目录，切换目录不影响：
 
 ```
 ~/.http-proxy/
+├── config.json       # 启动配置
+├── proxy.pid         # 进程 ID
 ├── data/
 │   └── proxy.db      # 数据库
 └── logs/
     └── proxy.log     # 日志文件（启用时）
 ```
+
+启动时自动保存配置，下次启动使用相同参数。
 
 也可自定义路径：
 
@@ -136,8 +140,6 @@ python proxy_server.py --db-file /var/lib/http-proxy/proxy.db
 # 安装服务时同样指定
 sudo python proxy_server.py install --db-file /var/lib/http-proxy/proxy.db
 ```
-
-安装服务时会保存当前的配置参数。
 
 ## Dashboard 看板
 

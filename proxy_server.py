@@ -50,7 +50,11 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 # 全局变量用于信号处理
 _server = None
 _shutdown_requested = False
-PID_FILE = 'proxy.pid'
+
+# 配置目录
+CONFIG_DIR = os.path.expanduser('~/.http-proxy')
+PID_FILE = os.path.join(CONFIG_DIR, 'proxy.pid')
+CONFIG_FILE = os.path.join(CONFIG_DIR, 'config.json')
 SERVICE_NAME = 'http-proxy'
 SERVICE_FILE = f'/etc/systemd/system/{SERVICE_NAME}.service'
 
@@ -74,6 +78,34 @@ def remove_pid():
     """删除 PID 文件"""
     if os.path.exists(PID_FILE):
         os.remove(PID_FILE)
+
+
+def save_config(args):
+    """保存配置到文件"""
+    import json
+    config = {
+        'port': args.port,
+        'no_web': args.no_web,
+        'web_host': args.web_host,
+        'web_port': args.web_port,
+        'enable_log_file': args.enable_log_file,
+        'log_file': args.log_file,
+        'db_file': args.db_file,
+        'restart_delay': args.restart_delay,
+        'no_color': args.no_color
+    }
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=2)
+
+
+def load_config():
+    """从文件加载配置"""
+    import json
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    return None
 
 
 def is_running():
@@ -370,6 +402,9 @@ def start_daemon(args):
         print(f"{Colors.RED}服务已在运行中 (PID: {pid}){Colors.RESET}")
         print(f"{Colors.YELLOW}如需重启，请先执行: python proxy_server.py stop{Colors.RESET}")
         return
+
+    # 保存配置
+    save_config(args)
 
     # 设置信号处理
     signal.signal(signal.SIGTERM, signal_handler)
