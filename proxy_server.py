@@ -81,19 +81,38 @@ def remove_pid():
 
 
 def save_config(args):
-    """保存配置到文件"""
+    """保存配置到文件（只保存非默认值）"""
     import json
-    config = {
-        'port': args.port,
-        'no_web': args.no_web,
-        'web_host': args.web_host,
-        'web_port': args.web_port,
-        'enable_log_file': args.enable_log_file,
-        'log_file': args.log_file,
-        'db_file': args.db_file,
-        'restart_delay': args.restart_delay,
-        'no_color': args.no_color
+
+    # 默认值
+    DEFAULTS = {
+        'port': 12345,
+        'no_web': False,
+        'web_host': '127.0.0.1',
+        'web_port': 3420,
+        'enable_log_file': False,
+        'restart_delay': 3,
+        'no_color': False
     }
+
+    # 只保存非默认值
+    config = {}
+
+    if args.port != DEFAULTS['port']:
+        config['port'] = args.port
+    if args.no_web != DEFAULTS['no_web']:
+        config['no_web'] = args.no_web
+    if args.web_host != DEFAULTS['web_host']:
+        config['web_host'] = args.web_host
+    if args.web_port != DEFAULTS['web_port']:
+        config['web_port'] = args.web_port
+    if args.enable_log_file != DEFAULTS['enable_log_file']:
+        config['enable_log_file'] = args.enable_log_file
+    if args.restart_delay != DEFAULTS['restart_delay']:
+        config['restart_delay'] = args.restart_delay
+    if args.no_color != DEFAULTS['no_color']:
+        config['no_color'] = args.no_color
+
     os.makedirs(CONFIG_DIR, exist_ok=True)
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2)
@@ -190,24 +209,24 @@ def install_service():
     working_dir = get_working_dir()
     python_path = sys.executable
 
-    # 构建启动命令（从配置读取）
+    # 构建启动命令（配置中只保存非默认值，存在的就需要添加）
     cmd_args = [python_path, script_path, 'start']
+
+    if 'port' in config:
+        cmd_args.append(f'--port={config["port"]}')
+
     if config.get('enable_log_file'):
         cmd_args.append('--enable-log-file')
-    if config.get('log_file'):
-        cmd_args.append(f'--log-file={config["log_file"]}')
-    if config.get('db_file'):
-        cmd_args.append(f'--db-file={config["db_file"]}')
-    if config.get('port'):
-        cmd_args.append(f'--port={config["port"]}')
+
     if config.get('no_web'):
         cmd_args.append('--no-web')
     else:
-        if config.get('web_host'):
+        if 'web_host' in config:
             cmd_args.append(f'--web-host={config["web_host"]}')
-        if config.get('web_port'):
+        if 'web_port' in config:
             cmd_args.append(f'--web-port={config["web_port"]}')
-    if config.get('restart_delay'):
+
+    if 'restart_delay' in config:
         cmd_args.append(f'--restart-delay={config["restart_delay"]}')
 
     # 构建 systemd 服务文件
