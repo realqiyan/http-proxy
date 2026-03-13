@@ -172,8 +172,15 @@ def get_working_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def install_service(args):
+def install_service():
     """安装 systemd 服务"""
+    # 先检查配置文件是否存在
+    config = load_config()
+    if not config:
+        print(f"{Colors.RED}错误: 配置文件不存在，请先启动一次服务{Colors.RESET}")
+        print(f"{Colors.YELLOW}提示: python proxy_server.py{Colors.RESET}")
+        return False
+
     # 检查是否有 root 权限
     if os.geteuid() != 0:
         print(f"{Colors.RED}错误: 需要 root 权限，请使用 sudo{Colors.RESET}")
@@ -183,18 +190,25 @@ def install_service(args):
     working_dir = get_working_dir()
     python_path = sys.executable
 
-    # 构建启动命令
+    # 构建启动命令（从配置读取）
     cmd_args = [python_path, script_path, 'start']
-    if args.enable_log_file:
+    if config.get('enable_log_file'):
         cmd_args.append('--enable-log-file')
-        cmd_args.append(f'--log-file={args.log_file}')
-    cmd_args.append(f'--db-file={args.db_file}')
-    cmd_args.append(f'--port={args.port}')
-    if args.no_web:
+    if config.get('log_file'):
+        cmd_args.append(f'--log-file={config["log_file"]}')
+    if config.get('db_file'):
+        cmd_args.append(f'--db-file={config["db_file"]}')
+    if config.get('port'):
+        cmd_args.append(f'--port={config["port"]}')
+    if config.get('no_web'):
         cmd_args.append('--no-web')
     else:
-        cmd_args.append(f'--web-host={args.web_host}')
-        cmd_args.append(f'--web-port={args.web_port}')
+        if config.get('web_host'):
+            cmd_args.append(f'--web-host={config["web_host"]}')
+        if config.get('web_port'):
+            cmd_args.append(f'--web-port={config["web_port"]}')
+    if config.get('restart_delay'):
+        cmd_args.append(f'--restart-delay={config["restart_delay"]}')
 
     # 构建 systemd 服务文件
     service_content = f"""[Unit]
@@ -549,7 +563,7 @@ Dashboard:
         start_daemon(args)
 
     elif args.command == 'install':
-        install_service(args)
+        install_service()
 
     elif args.command == 'uninstall':
         uninstall_service()

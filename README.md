@@ -99,7 +99,10 @@ sudo python proxy_server.py uninstall
 安装后服务会自动启动并设置开机自启：
 
 ```bash
-# 安装服务
+# 1. 先启动服务（保存配置）
+python proxy_server.py
+
+# 2. 安装为系统服务
 sudo python proxy_server.py install
 
 # 服务管理
@@ -114,6 +117,8 @@ sudo journalctl -u http-proxy -f
 # 卸载服务
 sudo python proxy_server.py uninstall
 ```
+
+`install` 命令从 `~/.http-proxy/config.json` 读取配置，无需指定参数。
 
 ### 数据持久化
 
