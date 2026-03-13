@@ -56,7 +56,7 @@ CONFIG_DIR = os.path.expanduser('~/.http-proxy')
 PID_FILE = os.path.join(CONFIG_DIR, 'proxy.pid')
 CONFIG_FILE = os.path.join(CONFIG_DIR, 'config.json')
 SERVICE_NAME = 'http-proxy'
-SERVICE_FILE = f'/etc/systemd/system/{SERVICE_NAME}.service'
+SERVICE_FILE = os.path.expanduser(f'~/.config/systemd/user/{SERVICE_NAME}.service')
 
 
 def signal_handler(signum, frame):
@@ -143,6 +143,20 @@ def is_running():
 
 def stop_server():
     """停止服务器"""
+    # 先检查是否由 systemd 用户服务管理
+    try:
+        result = subprocess.run(['systemctl', '--user', 'is-active', SERVICE_NAME],
+                                capture_output=True, text=True)
+        if result.returncode == 0:
+            # 由 systemd 用户服务管理，使用 systemctl 停止
+            print(f"{Colors.YELLOW}正在通过 systemd 停止服务...{Colors.RESET}")
+            subprocess.run(['systemctl', '--user', 'stop', SERVICE_NAME], check=True)
+            print(f"{Colors.GREEN}服务已停止{Colors.RESET}")
+            return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    # 非 systemd 管理，通过 PID 文件停止
     if not os.path.exists(PID_FILE):
         print(f"{Colors.RED}服务未运行{Colors.RESET}")
         return False
@@ -192,18 +206,17 @@ def get_working_dir():
 
 
 def install_service():
-    """安装 systemd 服务"""
-    # 先检查配置文件是否存在
-    config = load_config()
-    if not config:
-        print(f"{Colors.RED}错误: 配置文件不存在，请先启动一次服务{Colors.RESET}")
-        print(f"{Colors.YELLOW}提示: python proxy_server.py{Colors.RESET}")
-        return False
+    """安装 systemd 用户服务"""
+    import json
 
-    # 检查是否有 root 权限
-    if os.geteuid() != 0:
-        print(f"{Colors.RED}错误: 需要 root 权限，请使用 sudo{Colors.RESET}")
-        return False
+    # 读取配置文件，如果不存在则创建空配置文件
+    config = load_config()
+    if config is None:
+        config = {}
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        print(f"{Colors.GREEN}✓{Colors.RESET} 已创建配置文件: {CONFIG_FILE}")
 
     script_path = get_script_path()
     working_dir = get_working_dir()
@@ -229,14 +242,13 @@ def install_service():
     if 'restart_delay' in config:
         cmd_args.append(f'--restart-delay={config["restart_delay"]}')
 
-    # 构建 systemd 服务文件
+    # 构建 systemd 用户服务文件
     service_content = f"""[Unit]
 Description=HTTP Proxy Logger
 After=network.target
 
 [Service]
 Type=simple
-User=root
 WorkingDirectory={working_dir}
 ExecStart={' '.join(cmd_args)}
 Restart=always
@@ -245,32 +257,35 @@ StandardOutput=journal
 StandardError=journal
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 """
 
     # 写入服务文件
     try:
+        service_dir = os.path.dirname(SERVICE_FILE)
+        os.makedirs(service_dir, exist_ok=True)
+
         with open(SERVICE_FILE, 'w') as f:
             f.write(service_content)
         print(f"{Colors.GREEN}✓{Colors.RESET} 服务文件已创建: {SERVICE_FILE}")
 
-        # 重载 systemd
-        subprocess.run(['systemctl', 'daemon-reload'], check=True)
+        # 重载 systemd 用户服务
+        subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
         print(f"{Colors.GREEN}✓{Colors.RESET} systemd 配置已重载")
 
         # 启用服务
-        subprocess.run(['systemctl', 'enable', SERVICE_NAME], check=True)
+        subprocess.run(['systemctl', '--user', 'enable', SERVICE_NAME], check=True)
         print(f"{Colors.GREEN}✓{Colors.RESET} 服务已设置为开机自启")
 
         # 启动服务
-        subprocess.run(['systemctl', 'start', SERVICE_NAME], check=True)
+        subprocess.run(['systemctl', '--user', 'start', SERVICE_NAME], check=True)
         print(f"{Colors.GREEN}✓{Colors.RESET} 服务已启动")
 
         print(f"\n{Colors.CYAN}服务管理命令:{Colors.RESET}")
-        print(f"  查看状态: sudo systemctl status {SERVICE_NAME}")
-        print(f"  查看日志: sudo journalctl -u {SERVICE_NAME} -f")
-        print(f"  停止服务: sudo systemctl stop {SERVICE_NAME}")
-        print(f"  卸载服务: sudo python {script_path} uninstall")
+        print(f"  查看状态: systemctl --user status {SERVICE_NAME}")
+        print(f"  查看日志: journalctl --user -u {SERVICE_NAME} -f")
+        print(f"  停止服务: systemctl --user stop {SERVICE_NAME}")
+        print(f"  卸载服务: python {script_path} uninstall")
 
         return True
 
@@ -283,25 +298,20 @@ WantedBy=multi-user.target
 
 
 def uninstall_service():
-    """卸载 systemd 服务"""
-    # 检查是否有 root 权限
-    if os.geteuid() != 0:
-        print(f"{Colors.RED}错误: 需要 root 权限，请使用 sudo{Colors.RESET}")
-        return False
-
+    """卸载 systemd 用户服务"""
     try:
         # 停止服务
-        result = subprocess.run(['systemctl', 'is-active', SERVICE_NAME],
+        result = subprocess.run(['systemctl', '--user', 'is-active', SERVICE_NAME],
                                 capture_output=True, text=True)
         if result.returncode == 0:
-            subprocess.run(['systemctl', 'stop', SERVICE_NAME], check=True)
+            subprocess.run(['systemctl', '--user', 'stop', SERVICE_NAME], check=True)
             print(f"{Colors.GREEN}✓{Colors.RESET} 服务已停止")
 
         # 禁用服务
-        result = subprocess.run(['systemctl', 'is-enabled', SERVICE_NAME],
+        result = subprocess.run(['systemctl', '--user', 'is-enabled', SERVICE_NAME],
                                 capture_output=True, text=True)
         if result.returncode == 0:
-            subprocess.run(['systemctl', 'disable', SERVICE_NAME], check=True)
+            subprocess.run(['systemctl', '--user', 'disable', SERVICE_NAME], check=True)
             print(f"{Colors.GREEN}✓{Colors.RESET} 已取消开机自启")
 
         # 删除服务文件
@@ -310,7 +320,7 @@ def uninstall_service():
             print(f"{Colors.GREEN}✓{Colors.RESET} 服务文件已删除")
 
         # 重载 systemd
-        subprocess.run(['systemctl', 'daemon-reload'], check=True)
+        subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
         print(f"{Colors.GREEN}✓{Colors.RESET} systemd 配置已重载")
 
         print(f"\n{Colors.GREEN}服务已完全卸载{Colors.RESET}")
