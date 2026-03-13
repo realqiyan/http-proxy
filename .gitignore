@@ -24,6 +24,10 @@ wheels/
 logs/
 *.log
 
+# Database
+data/
+*.db
+
 # IDE
 .idea/
 .vscode/
