@@ -115,6 +115,20 @@ sudo journalctl -u http-proxy -f
 sudo python proxy_server.py uninstall
 ```
 
+### 数据持久化
+
+默认数据存储在脚本目录下，移动目录会导致数据丢失。建议使用绝对路径：
+
+```bash
+# 推荐配置：使用固定数据目录
+python proxy_server.py --db-file /var/lib/http-proxy/proxy.db --log-file /var/log/http-proxy/proxy.log
+
+# 安装为服务时同样指定
+sudo python proxy_server.py install --db-file /var/lib/http-proxy/proxy.db --log-file /var/log/http-proxy/proxy.log
+```
+
+安装服务时会保存当前的配置参数。
+
 ## Dashboard 看板
 
 访问 `http://127.0.0.1:3420` 查看 Web 界面：

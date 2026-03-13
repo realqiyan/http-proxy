@@ -151,6 +151,19 @@ def install_service(args):
     working_dir = get_working_dir()
     python_path = sys.executable
 
+    # 构建启动命令
+    cmd_args = [python_path, script_path, 'start']
+    if args.enable_log_file:
+        cmd_args.append('--enable-log-file')
+        cmd_args.append(f'--log-file={args.log_file}')
+    cmd_args.append(f'--db-file={args.db_file}')
+    cmd_args.append(f'--port={args.port}')
+    if args.no_web:
+        cmd_args.append('--no-web')
+    else:
+        cmd_args.append(f'--web-host={args.web_host}')
+        cmd_args.append(f'--web-port={args.web_port}')
+
     # 构建 systemd 服务文件
     service_content = f"""[Unit]
 Description=HTTP Proxy Logger
@@ -160,7 +173,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory={working_dir}
-ExecStart={python_path} {script_path} start --enable-log-file
+ExecStart={' '.join(cmd_args)}
 Restart=always
 RestartSec=3
 StandardOutput=journal
