@@ -431,6 +431,8 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
 
                 const reqHeaders = detail.request_headers ? JSON.parse(detail.request_headers) : {};
                 const respHeaders = detail.response_headers ? JSON.parse(detail.response_headers) : {};
+                const reqBody = detail.request_body || '(empty)';
+                const respBody = detail.response_body || '(empty)';
 
                 document.getElementById('detail-view').outerHTML = `
                     <div id="detail-view" class="detail-content">
@@ -451,7 +453,7 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
                                 </div>
                             `).join('')}
                             <h3 style="margin-top:16px">Request Body</h3>
-                            ${renderBody(detail.request_body, reqHeaders, 'req-body')}
+                            ${renderBody(reqBody, reqHeaders, 'req-body')}
                         </div>
                         <div class="detail-section">
                             <h3>Response</h3>
@@ -466,10 +468,35 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
                                 </div>
                             `).join('')}
                             <h3 style="margin-top:16px">Response Body</h3>
-                            ${renderBody(detail.response_body, respHeaders, 'resp-body')}
+                            ${renderBody(respBody, respHeaders, 'resp-body')}
                         </div>
                     </div>
                 `;
+
+                // 使用 textContent 设置 body 内容，避免 HTML 解析问题
+                const reqBodyDiv = document.getElementById('body-req-body');
+                const respBodyDiv = document.getElementById('body-resp-body');
+
+                // 监控 div 变化，如果被外部修改则恢复
+                const protectContent = (div, originalContent) => {
+                    const observer = new MutationObserver(() => {
+                        if (div.textContent !== originalContent) {
+                            // 延迟恢复，避免无限循环
+                            setTimeout(() => {
+                                if (div.textContent !== originalContent) {
+                                    div.textContent = originalContent;
+                                }
+                            }, 0);
+                        }
+                    });
+                    observer.observe(div, { childList: true, characterData: true, subtree: true });
+                    return observer;
+                };
+
+                reqBodyDiv.textContent = reqBody;
+                respBodyDiv.textContent = respBody;
+                protectContent(reqBodyDiv, reqBody);
+                protectContent(respBodyDiv, respBody);
             } catch (e) {
                 console.error('Load detail failed:', e);
             }
@@ -561,16 +588,6 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
             return ct.toLowerCase().includes('application/json');
         }
 
-        function formatJson(str) {
-            if (!str) return null;
-            try {
-                const obj = JSON.parse(str);
-                return JSON.stringify(obj, null, 2);
-            } catch (e) {
-                return null;
-            }
-        }
-
         function syntaxHighlightJson(json) {
             return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
                 let cls = 'json-number';
@@ -590,17 +607,12 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
         }
 
         function renderBody(body, headers, bodyId) {
-            const isJson = isJsonContentType(headers);
-            const formatted = isJson ? formatJson(body) : null;
-            const displayBody = formatted || body || '(empty)';
-            const escapedBody = formatted ? syntaxHighlightJson(escapeHtml(displayBody)) : escapeHtml(displayBody);
-
             return `
                 <div class="body-header">
                     <h3>Body</h3>
                     <button class="btn-copy" data-body="${encodeURIComponent(body || '')}" onclick="copyBody(this)">Copy</button>
                 </div>
-                <div class="body-content">${escapedBody}</div>
+                <div class="body-content" id="body-${bodyId}"></div>
             `;
         }
 
