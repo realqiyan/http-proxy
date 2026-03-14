@@ -1,6 +1,6 @@
 """Dashboard HTML 模板"""
 
-DASHBOARD_HTML = '''<!DOCTYPE html>
+DASHBOARD_HTML = r'''<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -232,6 +232,28 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             transition: background 0.15s;
         }
         .sensitive-value:hover { background: #30363d; }
+        .body-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .body-header h3 { margin: 0; }
+        .btn-copy {
+            padding: 4px 10px;
+            font-size: 11px;
+            background: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            color: #8b949e;
+            cursor: pointer;
+        }
+        .btn-copy:hover { background: #30363d; color: #c9d1d9; }
+        .json-key { color: #79c0ff; }
+        .json-string { color: #a5d6ff; }
+        .json-number { color: #79c0ff; }
+        .json-boolean { color: #ff7b72; }
+        .json-null { color: #8b949e; }
     </style>
 </head>
 <body>
@@ -429,7 +451,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                                 </div>
                             `).join('')}
                             <h3 style="margin-top:16px">Request Body</h3>
-                            <div class="body-content">${escapeHtml(detail.request_body || '(empty)')}</div>
+                            ${renderBody(detail.request_body, reqHeaders, 'req-body')}
                         </div>
                         <div class="detail-section">
                             <h3>Response</h3>
@@ -444,7 +466,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                                 </div>
                             `).join('')}
                             <h3 style="margin-top:16px">Response Body</h3>
-                            <div class="body-content">${escapeHtml(detail.response_body || '(empty)')}</div>
+                            ${renderBody(detail.response_body, respHeaders, 'resp-body')}
                         </div>
                     </div>
                 `;
@@ -509,6 +531,86 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             const current = el.textContent;
             const original = el.dataset.value;
             el.textContent = current === original ? escapeHtml(maskHeader('', original)) : original;
+        }
+
+        function copyToClipboard(text, btn) {
+            // 使用 textarea fallback 方案（支持非 HTTPS 环境）
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            try {
+                document.execCommand('copy');
+                const originalText = btn.textContent;
+                btn.textContent = 'Copied!';
+                btn.style.color = '#3fb950';
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.style.color = '';
+                }, 1500);
+            } catch (err) {
+                console.error('Copy failed:', err);
+            }
+            document.body.removeChild(textarea);
+        }
+
+        function isJsonContentType(headers) {
+            const ct = headers['content-type'] || headers['Content-Type'] || '';
+            return ct.toLowerCase().includes('application/json');
+        }
+
+        function formatJson(str) {
+            if (!str) return null;
+            try {
+                const obj = JSON.parse(str);
+                return JSON.stringify(obj, null, 2);
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function syntaxHighlightJson(json) {
+            return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
+                let cls = 'json-number';
+                if (/^"/.test(match)) {
+                    if (/:$/.test(match)) {
+                        cls = 'json-key';
+                    } else {
+                        cls = 'json-string';
+                    }
+                } else if (/true|false/.test(match)) {
+                    cls = 'json-boolean';
+                } else if (/null/.test(match)) {
+                    cls = 'json-null';
+                }
+                return '<span class="' + cls + '">' + match + '</span>';
+            });
+        }
+
+        function renderBody(body, headers, bodyId) {
+            const isJson = isJsonContentType(headers);
+            const formatted = isJson ? formatJson(body) : null;
+            const displayBody = formatted || body || '(empty)';
+            const escapedBody = formatted ? syntaxHighlightJson(escapeHtml(displayBody)) : escapeHtml(displayBody);
+
+            return `
+                <div class="body-header">
+                    <h3>Body</h3>
+                    <button class="btn-copy" data-body="${encodeURIComponent(body || '')}" onclick="copyBody(this)">Copy</button>
+                </div>
+                <div class="body-content">${escapedBody}</div>
+            `;
+        }
+
+        function copyBody(btn) {
+            const raw = decodeURIComponent(btn.getAttribute('data-body'));
+            copyToClipboard(raw, btn);
+        }
+
+        function escapeJs(str) {
+            return str.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
         }
 
         function setupAutoRefresh() {

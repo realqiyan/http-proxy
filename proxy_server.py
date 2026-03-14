@@ -13,8 +13,7 @@ HTTP Forwarding Server - HTTP 转发服务器
 - 并发处理多个请求
 - SQLite 持久化存储
 - Web Dashboard 看板
-- 后台运行与进程守护
-- Linux systemd 服务支持
+- Linux systemd 用户服务支持
 """
 
 import argparse
@@ -24,18 +23,14 @@ import os
 import sys
 import threading
 import signal
-import time
-import traceback
 import subprocess
-import shutil
 from datetime import datetime
 
 from utils.colors import Colors
-from utils.format import format_size, format_duration
 from core.database import DatabaseManager
 from core.logger import RequestLogger
 from core.handlers import ForwardingHandler
-from dashboard.server import start_dashboard_server
+from dashboard.server import DashboardServer
 
 
 class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -49,11 +44,10 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 # 全局变量用于信号处理
 _server = None
-_shutdown_requested = False
+_dashboard_server = None
 
 # 配置目录
 CONFIG_DIR = os.path.expanduser('~/.http-proxy')
-PID_FILE = os.path.join(CONFIG_DIR, 'proxy.pid')
 CONFIG_FILE = os.path.join(CONFIG_DIR, 'config.json')
 SERVICE_NAME = 'http-proxy'
 SERVICE_FILE = os.path.expanduser(f'~/.config/systemd/user/{SERVICE_NAME}.service')
@@ -61,23 +55,14 @@ SERVICE_FILE = os.path.expanduser(f'~/.config/systemd/user/{SERVICE_NAME}.servic
 
 def signal_handler(signum, frame):
     """信号处理器"""
-    global _shutdown_requested
-    _shutdown_requested = True
-    if _server:
-        print(f"\n{Colors.YELLOW}收到终止信号，正在关闭...{Colors.RESET}")
-        _server.shutdown()
-
-
-def write_pid():
-    """写入 PID 文件"""
-    with open(PID_FILE, 'w') as f:
-        f.write(str(os.getpid()))
-
-
-def remove_pid():
-    """删除 PID 文件"""
-    if os.path.exists(PID_FILE):
-        os.remove(PID_FILE)
+    global _server, _dashboard_server
+    # shutdown() 必须在不同线程中调用
+    def do_shutdown():
+        if _server:
+            _server.shutdown()
+        if _dashboard_server:
+            _dashboard_server.shutdown()
+    threading.Thread(target=do_shutdown, daemon=True).start()
 
 
 def save_config(args):
@@ -91,7 +76,6 @@ def save_config(args):
         'web_host': '127.0.0.1',
         'web_port': 3420,
         'enable_log_file': False,
-        'restart_delay': 3,
         'no_color': False
     }
 
@@ -108,8 +92,6 @@ def save_config(args):
         config['web_port'] = args.web_port
     if args.enable_log_file != DEFAULTS['enable_log_file']:
         config['enable_log_file'] = args.enable_log_file
-    if args.restart_delay != DEFAULTS['restart_delay']:
-        config['restart_delay'] = args.restart_delay
     if args.no_color != DEFAULTS['no_color']:
         config['no_color'] = args.no_color
 
@@ -125,74 +107,6 @@ def load_config():
         with open(CONFIG_FILE, 'r') as f:
             return json.load(f)
     return None
-
-
-def is_running():
-    """检查服务是否正在运行"""
-    if not os.path.exists(PID_FILE):
-        return False
-    try:
-        with open(PID_FILE, 'r') as f:
-            pid = int(f.read().strip())
-        # 检查进程是否存在
-        os.kill(pid, 0)
-        return True
-    except (ValueError, ProcessLookupError, PermissionError):
-        return False
-
-
-def stop_server():
-    """停止服务器"""
-    # 先检查是否由 systemd 用户服务管理
-    try:
-        result = subprocess.run(['systemctl', '--user', 'is-active', SERVICE_NAME],
-                                capture_output=True, text=True)
-        if result.returncode == 0:
-            # 由 systemd 用户服务管理，使用 systemctl 停止
-            print(f"{Colors.YELLOW}正在通过 systemd 停止服务...{Colors.RESET}")
-            subprocess.run(['systemctl', '--user', 'stop', SERVICE_NAME], check=True)
-            print(f"{Colors.GREEN}服务已停止{Colors.RESET}")
-            return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-
-    # 非 systemd 管理，通过 PID 文件停止
-    if not os.path.exists(PID_FILE):
-        print(f"{Colors.RED}服务未运行{Colors.RESET}")
-        return False
-
-    try:
-        with open(PID_FILE, 'r') as f:
-            pid = int(f.read().strip())
-
-        # 发送 SIGTERM 信号
-        os.kill(pid, signal.SIGTERM)
-        print(f"{Colors.YELLOW}正在停止服务 (PID: {pid})...{Colors.RESET}")
-
-        # 等待进程结束
-        for _ in range(10):
-            try:
-                os.kill(pid, 0)
-                time.sleep(0.5)
-            except ProcessLookupError:
-                print(f"{Colors.GREEN}服务已停止{Colors.RESET}")
-                remove_pid()
-                return True
-
-        # 如果进程还在，强制杀死
-        try:
-            os.kill(pid, signal.SIGKILL)
-            print(f"{Colors.YELLOW}已强制停止服务{Colors.RESET}")
-        except ProcessLookupError:
-            pass
-
-        remove_pid()
-        return True
-
-    except (ValueError, ProcessLookupError, PermissionError) as e:
-        print(f"{Colors.RED}停止失败: {e}{Colors.RESET}")
-        remove_pid()
-        return False
 
 
 def get_script_path():
@@ -223,7 +137,7 @@ def install_service():
     python_path = sys.executable
 
     # 构建启动命令（配置中只保存非默认值，存在的就需要添加）
-    cmd_args = [python_path, script_path, 'start']
+    cmd_args = [python_path, script_path]
 
     if 'port' in config:
         cmd_args.append(f'--port={config["port"]}')
@@ -238,9 +152,6 @@ def install_service():
             cmd_args.append(f'--web-host={config["web_host"]}')
         if 'web_port' in config:
             cmd_args.append(f'--web-port={config["web_port"]}')
-
-    if 'restart_delay' in config:
-        cmd_args.append(f'--restart-delay={config["restart_delay"]}')
 
     # 构建 systemd 用户服务文件
     service_content = f"""[Unit]
@@ -340,10 +251,7 @@ def uninstall_service():
 
 def run_server(args):
     """运行服务器"""
-    global _server
-
-    # 写入 PID
-    write_pid()
+    global _server, _dashboard_server
 
     # 创建数据库管理器
     db_manager = DatabaseManager(args.db_file)
@@ -353,11 +261,10 @@ def run_server(args):
 
     # 启动 Dashboard 服务器（独立线程）
     if not args.no_web:
-        dashboard_thread = threading.Thread(
-            target=start_dashboard_server,
-            args=(args.web_host, args.web_port, db_manager),
-            daemon=True
-        )
+        from dashboard.handler import DashboardHandler
+        _dashboard_server = DashboardServer((args.web_host, args.web_port), DashboardHandler)
+        _dashboard_server.db_manager = db_manager
+        dashboard_thread = threading.Thread(target=_dashboard_server.serve_forever, daemon=True)
         dashboard_thread.start()
 
     # 启动代理服务器
@@ -380,7 +287,7 @@ def run_server(args):
     print(f"\n{Colors.BOLD}使用方式:{Colors.RESET}")
     print(f"  {Colors.DIM}http://127.0.0.1:{args.port}/http://example.com{Colors.RESET}")
     print(f"  {Colors.DIM}http://127.0.0.1:{args.port}/https://example.com{Colors.RESET}")
-    print(f"\n{Colors.DIM}停止服务: python proxy_server.py stop{Colors.RESET}\n")
+    print(f"\n{Colors.DIM}按 Ctrl+C 停止服务{Colors.RESET}\n")
 
     # 记录启动日志
     if args.enable_log_file:
@@ -393,68 +300,13 @@ def run_server(args):
 
     try:
         _server.serve_forever()
+    except KeyboardInterrupt:
+        pass
     finally:
+        print(f"\n{Colors.YELLOW}服务已关闭{Colors.RESET}")
         _server.server_close()
-        remove_pid()
-
-
-def daemon_main(args):
-    """守护进程主循环"""
-    global _shutdown_requested
-
-    restart_count = 0
-
-    while not _shutdown_requested:
-        try:
-            run_server(args)
-        except KeyboardInterrupt:
-            break
-        except OSError as e:
-            # 端口占用等错误不重试
-            if e.errno == 98:  # Address already in use
-                print(f"\n{Colors.RED}[Daemon] 端口 {args.port} 已被占用，无法启动{Colors.RESET}")
-                remove_pid()
-                sys.exit(1)
-            raise
-        except Exception as e:
-            restart_count += 1
-            print(f"\n{Colors.RED}[Daemon] 服务异常退出: {e}{Colors.RESET}")
-            print(f"{Colors.RED}[Daemon] 堆栈跟踪:\n{traceback.format_exc()}{Colors.RESET}")
-
-            if _shutdown_requested:
-                break
-
-            print(f"{Colors.YELLOW}[Daemon] {args.restart_delay} 秒后自动重启... (重启次数: {restart_count}){Colors.RESET}")
-            time.sleep(args.restart_delay)
-
-    print(f"\n{Colors.YELLOW}[Daemon] 服务已停止{Colors.RESET}")
-
-    if args.enable_log_file:
-        with open(args.log_file, 'a', encoding='utf-8') as f:
-            f.write(f"\n{'='*60}\n")
-            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] SERVER STOPPED\n")
-            f.write(f"Total Restarts: {restart_count}\n")
-            f.write(f"{'='*60}\n\n")
-
-
-def start_daemon(args):
-    """启动守护进程"""
-    if is_running():
-        with open(PID_FILE, 'r') as f:
-            pid = f.read().strip()
-        print(f"{Colors.RED}服务已在运行中 (PID: {pid}){Colors.RESET}")
-        print(f"{Colors.YELLOW}如需重启，请先执行: python proxy_server.py stop{Colors.RESET}")
-        return
-
-    # 保存配置
-    save_config(args)
-
-    # 设置信号处理
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-
-    # 启动守护进程
-    daemon_main(args)
+        if _dashboard_server:
+            _dashboard_server.server_close()
 
 
 def main():
@@ -472,16 +324,11 @@ Dashboard:
   访问 http://127.0.0.1:3420 查看请求看板
 
 命令:
-  start       启动服务（后台运行，自动重启）
-  stop        停止服务
-  status      查看服务状态
-  install     安装 Linux 系统服务（开机自启）
-  uninstall   卸载 Linux 系统服务
+  install     安装 Linux 用户服务（开机自启）
+  uninstall   卸载 Linux 用户服务
 
 示例:
-  %(prog)s                           # 启动服务（后台）
-  %(prog)s stop                      # 停止服务
-  %(prog)s status                    # 查看状态
+  %(prog)s                           # 前台启动服务
   %(prog)s install                   # 安装系统服务
   %(prog)s uninstall                 # 卸载系统服务
   %(prog)s -p 8080                   # 指定端口启动
@@ -490,9 +337,9 @@ Dashboard:
     parser.add_argument(
         'command',
         nargs='?',
-        default='start',
-        choices=['start', 'stop', 'status', 'install', 'uninstall'],
-        help='命令: start(启动), stop(停止), status(状态), install(安装服务), uninstall(卸载服务)'
+        default=None,
+        choices=['install', 'uninstall'],
+        help='命令: install(安装服务), uninstall(卸载服务)'
     )
     parser.add_argument(
         '-p', '--port',
@@ -536,12 +383,6 @@ Dashboard:
         default=None,
         help='数据库文件路径 (默认: ~/.http-proxy/data/proxy.db)'
     )
-    parser.add_argument(
-        '--restart-delay',
-        type=int,
-        default=3,
-        help='自动重启延迟秒数 (默认: 3)'
-    )
 
     args = parser.parse_args()
 
@@ -567,35 +408,22 @@ Dashboard:
         os.makedirs(db_dir, exist_ok=True)
 
     # 处理命令
-    if args.command == 'stop':
-        stop_server()
-
-    elif args.command == 'status':
-        if is_running():
-            with open(PID_FILE, 'r') as f:
-                pid = f.read().strip()
-            print(f"{Colors.GREEN}服务运行中 (PID: {pid}){Colors.RESET}")
-            # 尝试获取统计信息
-            try:
-                import urllib.request
-                with urllib.request.urlopen(f"http://127.0.0.1:{args.web_port}/api/stats", timeout=2) as resp:
-                    stats = resp.read().decode()
-                    import json
-                    data = json.loads(stats)
-                    print(f"  总请求: {data['total']}, 成功: {data['success']}, 错误: {data['errors']}")
-            except:
-                pass
-        else:
-            print(f"{Colors.RED}服务未运行{Colors.RESET}")
-
-    elif args.command == 'start':
-        start_daemon(args)
-
-    elif args.command == 'install':
+    if args.command == 'install':
         install_service()
 
     elif args.command == 'uninstall':
         uninstall_service()
+
+    else:
+        # 保存配置
+        save_config(args)
+
+        # 设置信号处理
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
+        # 前台运行
+        run_server(args)
 
 
 if __name__ == '__main__':
