@@ -135,26 +135,56 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
         total_size = 0
 
         try:
-            # 逐块读取并转发
+            # SSE 事件边界处理：按行读取，遇到空行（\n\n）时表示一个完整事件结束
+            buffer = b''
+
             while True:
-                chunk = response.read(4096)  # 使用较小的块大小减少 SSE 消息分割
-                if not chunk:
-                    break
-
-                # 转发给客户端
+                # 尝试按行读取（更适合 SSE 格式）
                 try:
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    # 客户端断开连接 - 正常情况，不记录错误日志，直接结束流式传输
-                    break
+                    line = response.fp.readline()
+                    if not line:
+                        # 上游关闭连接，发送剩余缓冲区内容
+                        if buffer:
+                            self.wfile.write(buffer)
+                            self.wfile.flush()
+                            if cached_body.tell() < cache_limit:
+                                remaining = cache_limit - cached_body.tell()
+                                cached_body.write(buffer[:remaining])
+                            total_size += len(buffer)
+                        break
+                except (AttributeError, ValueError):
+                    # 无法使用 readline，回退到块读取
+                    line = response.read(1024)
+                    if not line:
+                        if buffer:
+                            self.wfile.write(buffer)
+                            self.wfile.flush()
+                            if cached_body.tell() < cache_limit:
+                                remaining = cache_limit - cached_body.tell()
+                                cached_body.write(buffer[:remaining])
+                            total_size += len(buffer)
+                        break
 
-                # 缓存用于日志
-                if cached_body.tell() < cache_limit:
-                    remaining = cache_limit - cached_body.tell()
-                    cached_body.write(chunk[:remaining])
+                buffer += line
 
-                total_size += len(chunk)
+                # 检测 SSE 事件边界：行以 \n 结尾，且下一行也是 \n（或 buffer 以 \n\n 结尾）
+                # 或者行本身就是空行（表示事件结束）
+                if line == b'\n' or line == b'\r\n' or buffer.endswith(b'\n\n'):
+                    # 完整事件，立即发送给客户端
+                    try:
+                        self.wfile.write(buffer)
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        # 客户端断开连接 - 正常情况，不记录错误日志，直接结束流式传输
+                        break
+
+                    # 缓存用于日志
+                    if cached_body.tell() < cache_limit:
+                        remaining = cache_limit - cached_body.tell()
+                        cached_body.write(buffer[:remaining])
+
+                    total_size += len(buffer)
+                    buffer = b''  # 重置缓冲区
 
         except socket.timeout:
             # 流式传输期间的超时 - 记录但不中断（可能上游暂停）
