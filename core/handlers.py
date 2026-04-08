@@ -16,6 +16,11 @@ from utils.colors import Colors
 from utils.format import format_size, format_duration
 
 
+# 阻止访问内部地址，防止 SSRF 攻击
+BLOCKED_HOSTS = ['localhost', '127.0.0.1', '169.254.169.254', '::1', '0.0.0.0']
+BLOCKED_SUFFIXES = ['.internal', '.local', '.localhost']
+
+
 class ForwardingHandler(http.server.BaseHTTPRequestHandler):
     """HTTP 转发请求处理器"""
 
@@ -36,9 +41,10 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
         except (ConnectionResetError, BrokenPipeError, socket.error):
             # 客户端在请求完成前断开连接 - 正常情况，静默处理
             pass
-        except Exception:
-            # 其他异常也静默处理，避免打印堆栈
-            pass
+        except Exception as e:
+            # 其他异常记录警告，便于调试
+            print(f"{Colors.DIM}{datetime.now().strftime('%H:%M:%S')}{Colors.RESET} "
+                  f"{Colors.YELLOW}[WARN]{Colors.RESET} Unexpected error in handle(): {type(e).__name__}: {e}")
 
     def log_message(self, format, *args):
         """禁用默认日志"""
@@ -115,11 +121,20 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
         """处理流式响应，边读边转发，同时缓存部分内容用于日志
 
         流式响应期间使用扩展的超时时间（stream_timeout），避免长对话生成中断。
+
+        关键：对于 chunked 流式响应，直接透传原始数据（不经过 HTTPResponse 解码），
+        否则客户端收到的是解码后的数据但头中保留了 Transfer-Encoding: chunked，导致解析错误。
         """
         # 获取流式超时配置
         stream_timeout = getattr(self.server, 'stream_timeout', 300)
 
-        # 发送响应头
+        # 确定响应头信息
+        headers_dict = dict(headers)
+        content_type = headers_dict.get('Content-Type', '').lower()
+        transfer_encoding = headers_dict.get('Transfer-Encoding', '').lower()
+        use_chunked = 'chunked' in transfer_encoding
+
+        # 发送响应头（对于 chunked 流式，保留 Transfer-Encoding）
         self.send_response(status, reason)
 
         for key, value in headers:
@@ -127,13 +142,13 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header(key, value)
 
         self.end_headers()
+        self.headers_sent = True  # 标记已发送响应头
 
         # 设置客户端 socket 为阻塞模式，避免超时中断
         original_timeout = self.request.gettimeout()
         self.request.settimeout(None)
 
         # 设置上游 socket 超时
-        # HTTPResponse.read() 没有超时参数，需要访问底层 socket
         try:
             if hasattr(response, 'fp') and hasattr(response.fp, '_fp'):
                 response.fp._fp.settimeout(stream_timeout)
@@ -144,57 +159,161 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
         cached_body = BytesIO()
         cache_limit = 65536
         total_size = 0
+        stream_failed = False
 
         try:
-            # SSE 事件边界处理：读取数据块，按 \n\n 边界切分后立即发送
-            # 注意：必须用 response.read() 而非 response.fp.readline()，
-            # 因为后者会读取原始 chunked 流（包含 chunk size 标记如 "7c\r\n"）
-            buffer = b''
             client_disconnected = False
 
-            while not client_disconnected:
-                # 读取较大的块以提高效率，然后按事件边界切分
-                chunk = response.read(4096)
-                if not chunk:
-                    # 上游关闭连接，发送剩余缓冲区内容
-                    if buffer:
-                        self.wfile.write(buffer)
-                        self.wfile.flush()
+            # 对于 chunked 编码的响应，直接透传原始数据流
+            # 因为 HTTPResponse.read() 会自动解码 chunked，去掉 size 标记
+            # 但客户端期望收到完整的 chunked 格式数据（包括 size 标记和结束标记 0\r\n\r\n）
+            if use_chunked:
+                # 直接读取原始 socket 数据（透传 chunked 格式）
+                raw_socket = None
+                try:
+                    if hasattr(response, 'fp') and hasattr(response.fp, '_fp'):
+                        raw_socket = response.fp._fp
+                except (AttributeError, socket.error):
+                    pass
+
+                if raw_socket:
+                    # 透传模式：直接从原始 socket 读取并转发
+                    while not client_disconnected:
+                        try:
+                            chunk = raw_socket.recv(8192)
+                        except socket.timeout:
+                            stream_failed = True
+                            print(f"{Colors.YELLOW}[STREAMING] Socket timeout after {stream_timeout}s{Colors.RESET}")
+                            break
+                        except socket.error as e:
+                            if e.errno == 11:  # EAGAIN/EWOULDBLOCK - 临时无数据
+                                continue
+                            stream_failed = True
+                            print(f"{Colors.YELLOW}[STREAMING] Socket error: {e}{Colors.RESET}")
+                            break
+
+                        if not chunk:
+                            # 上游关闭连接，chunked 流结束
+                            break
+
+                        # 直接转发原始 chunked 数据
+                        try:
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            client_disconnected = True
+                            stream_failed = True
+                            break
+
+                        # 缓存用于日志（解码后存储，便于查看）
                         if cached_body.tell() < cache_limit:
-                            remaining = cache_limit - cached_body.tell()
-                            cached_body.write(buffer[:remaining])
-                        total_size += len(buffer)
-                    break
+                            # 尝试解码部分数据用于日志显示
+                            try:
+                                # 去掉 chunk 标记，只保留实际内容
+                                decoded_chunk = self._decode_chunked_sample(chunk, cached_body.tell())
+                                remaining = cache_limit - cached_body.tell()
+                                cached_body.write(decoded_chunk[:remaining])
+                            except:
+                                # 解码失败，直接存储原始数据
+                                remaining = cache_limit - cached_body.tell()
+                                cached_body.write(chunk[:remaining])
 
-                buffer += chunk
+                        total_size += len(chunk)
+                else:
+                    # 无法访问原始 socket，回退到普通读取
+                    # 但需要重新编码为 chunked 格式发送给客户端
+                    buffer = b''
+                    while not client_disconnected:
+                        chunk = response.read(4096)
+                        if not chunk:
+                            # 发送剩余数据和 chunked 结束标记
+                            if buffer:
+                                chunk_data = self._encode_chunk(buffer)
+                                self.wfile.write(chunk_data)
+                                self.wfile.flush()
+                                total_size += len(chunk_data)
+                                if cached_body.tell() < cache_limit:
+                                    remaining = cache_limit - cached_body.tell()
+                                    cached_body.write(buffer[:remaining])
+                            # 发送结束标记
+                            self.wfile.write(b'0\r\n\r\n')
+                            self.wfile.flush()
+                            break
 
-                # 按 \n\n 边界切分，立即发送完整事件
-                while b'\n\n' in buffer and not client_disconnected:
-                    # 找到事件边界
-                    idx = buffer.find(b'\n\n') + 2  # 包含 \n\n
-                    event = buffer[:idx]
-                    buffer = buffer[idx:]
+                        buffer += chunk
 
-                    # 发送完整事件
-                    try:
-                        self.wfile.write(event)
+                        # 按事件边界切分，用 chunked 格式发送
+                        delimiter = b'\n\n' if 'text/event-stream' in content_type else b'\n'
+                        while delimiter in buffer and not client_disconnected:
+                            idx = buffer.find(delimiter) + len(delimiter)
+                            event = buffer[:idx]
+                            buffer = buffer[idx:]
+
+                            # 编码为 chunk 格式发送
+                            chunk_data = self._encode_chunk(event)
+                            try:
+                                self.wfile.write(chunk_data)
+                                self.wfile.flush()
+                            except (BrokenPipeError, ConnectionResetError):
+                                client_disconnected = True
+                                stream_failed = True
+                                break
+
+                            total_size += len(chunk_data)
+                            if cached_body.tell() < cache_limit:
+                                remaining = cache_limit - cached_body.tell()
+                                cached_body.write(event[:remaining])
+
+                    # 发送 chunked 结束标记
+                    if not client_disconnected:
+                        self.wfile.write(b'0\r\n\r\n')
                         self.wfile.flush()
-                    except (BrokenPipeError, ConnectionResetError):
-                        # 客户端断开连接
-                        client_disconnected = True
+            else:
+                # 非 chunked 流式响应（如 NDJSON），直接转发数据
+                # SSE 使用 \n\n，NDJSON 使用 \n
+                delimiter = b'\n\n' if 'text/event-stream' in content_type else b'\n'
+                buffer = b''
+
+                while not client_disconnected:
+                    chunk = response.read(4096)
+                    if not chunk:
+                        # 上游关闭连接，发送剩余缓冲区内容
+                        if buffer:
+                            self.wfile.write(buffer)
+                            self.wfile.flush()
+                            if cached_body.tell() < cache_limit:
+                                remaining = cache_limit - cached_body.tell()
+                                cached_body.write(buffer[:remaining])
+                            total_size += len(buffer)
                         break
 
-                    # 缓存用于日志
-                    if cached_body.tell() < cache_limit:
-                        remaining = cache_limit - cached_body.tell()
-                        cached_body.write(event[:remaining])
+                    buffer += chunk
 
-                    total_size += len(event)
+                    # 按事件边界切分，立即发送完整事件
+                    while delimiter in buffer and not client_disconnected:
+                        idx = buffer.find(delimiter) + len(delimiter)
+                        event = buffer[:idx]
+                        buffer = buffer[idx:]
+
+                        try:
+                            self.wfile.write(event)
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            client_disconnected = True
+                            stream_failed = True
+                            break
+
+                        if cached_body.tell() < cache_limit:
+                            remaining = cache_limit - cached_body.tell()
+                            cached_body.write(event[:remaining])
+
+                        total_size += len(event)
 
         except socket.timeout:
-            # 流式传输期间的超时 - 记录但不中断（可能上游暂停）
+            stream_failed = True
             print(f"{Colors.YELLOW}[STREAMING] Socket timeout after {stream_timeout}s{Colors.RESET}")
         except Exception as e:
+            stream_failed = True
             print(f"{Colors.YELLOW}[STREAMING] Error: {e}{Colors.RESET}")
 
         finally:
@@ -207,10 +326,46 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
 
         # 返回缓存的响应体（可能被截断）
         result = cached_body.getvalue()
-        if total_size > cache_limit:
-            result += f"\n\n... (truncated, total {format_size(total_size)})".encode('utf-8')
+        if total_size > cache_limit or stream_failed:
+            status_text = 'FAILED' if stream_failed else 'complete'
+            result += f"\n\n... (truncated, total {format_size(total_size)}, {status_text})".encode('utf-8')
 
         return result
+
+    def _encode_chunk(self, data: bytes) -> bytes:
+        """将数据编码为 HTTP chunked 格式"""
+        size = len(data)
+        return f'{size:x}\r\n'.encode('utf-8') + data + b'\r\n'
+
+    def _decode_chunked_sample(self, raw_data: bytes, offset: int) -> bytes:
+        """从原始 chunked 数据中解码一小段用于日志显示（简化版）"""
+        # 简化处理：尝试去除 chunk size 标记
+        # 格式: size\r\n data\r\n
+        try:
+            result = b''
+            pos = 0
+            while pos < len(raw_data) and len(result) < 4096:
+                # 找到 chunk size
+                end_size = raw_data.find(b'\r\n', pos)
+                if end_size == -1:
+                    result += raw_data[pos:]
+                    break
+
+                size_hex = raw_data[pos:end_size].decode('utf-8')
+                size = int(size_hex, 16)
+                data_start = end_size + 2
+                data_end = data_start + size
+
+                if data_end > len(raw_data):
+                    result += raw_data[data_start:]
+                    break
+
+                result += raw_data[data_start:data_end]
+                pos = data_end + 2  # 跳过 chunk 后的 \r\n
+
+            return result
+        except:
+            return raw_data
 
     def _handle_request(self, method: str):
         """处理请求并转发"""
@@ -223,6 +378,15 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
             return
 
         scheme, host, port, target_path = target
+
+        # SSRF 防护：检查是否为内部地址
+        host_lower = host.lower()
+        if host_lower in BLOCKED_HOSTS:
+            self.send_error(403, 'Forbidden: Internal addresses not allowed')
+            return
+        if any(host_lower.endswith(suffix) for suffix in BLOCKED_SUFFIXES):
+            self.send_error(403, 'Forbidden: Internal addresses not allowed')
+            return
         full_url = f"{scheme}://{host}:{port}{target_path}"
 
         conn = None
@@ -232,8 +396,16 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
             for key, value in self.headers.items():
                 request_headers[key] = value
 
-            # 读取请求体
-            content_length = int(self.headers.get('Content-Length', 0))
+            # 读取请求体（验证 Content-Length）
+            content_length_str = self.headers.get('Content-Length', '0')
+            try:
+                content_length = int(content_length_str)
+            except ValueError:
+                self.send_error(400, 'Bad Request: Invalid Content-Length')
+                return
+            if content_length < 0:
+                self.send_error(400, 'Bad Request: Negative Content-Length')
+                return
             request_body = self.rfile.read(content_length) if content_length > 0 else b''
 
             # 创建目标连接（增加超时和重试）
@@ -246,8 +418,13 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
                 try:
                     if scheme == 'https':
                         context = ssl.create_default_context()
-                        context.check_hostname = False
-                        context.verify_mode = ssl.CERT_NONE
+                        verify_ssl = getattr(self.server, 'verify_ssl', False)
+                        if verify_ssl:
+                            context.check_hostname = True
+                            context.verify_mode = ssl.CERT_REQUIRED
+                        else:
+                            context.check_hostname = False
+                            context.verify_mode = ssl.CERT_NONE
                         conn = http.client.HTTPSConnection(host, port, context=context, timeout=connect_timeout)
                     else:
                         conn = http.client.HTTPConnection(host, port, timeout=connect_timeout)
@@ -309,6 +486,7 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
 
                 self.send_header('Content-Length', str(len(response_body)))
                 self.end_headers()
+                self.headers_sent = True  # 标记已发送响应头
 
                 self.wfile.write(response_body)
 

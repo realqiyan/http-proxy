@@ -346,6 +346,28 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
         let selectedId = null;
         let refreshInterval = null;
 
+        // 认证令牌支持
+        function getAuthToken() {
+            // 从 URL 参数获取
+            const params = new URLSearchParams(window.location.search);
+            return params.get('token') || localStorage.getItem('auth_token');
+        }
+
+        function setAuthToken(token) {
+            if (token) {
+                localStorage.setItem('auth_token', token);
+            }
+        }
+
+        function authFetch(url, options = {}) {
+            const token = getAuthToken();
+            if (token) {
+                options.headers = options.headers || {};
+                options.headers['Authorization'] = 'Bearer ' + token;
+            }
+            return fetch(url, options);
+        }
+
         function formatSize(bytes) {
             if (!bytes) return '0B';
             const units = ['B', 'KB', 'MB', 'GB'];
@@ -358,12 +380,19 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
 
         function formatTime(iso) {
             const d = new Date(iso);
-            return d.toTimeString().slice(0, 8);
+            const month = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            const time = d.toTimeString().slice(0, 8);
+            return `${month}-${day} ${time}`;
         }
 
         async function loadStats() {
             try {
-                const res = await fetch('/api/stats');
+                const res = await authFetch('/api/stats');
+                if (res.status === 401) {
+                    showAuthPrompt();
+                    return;
+                }
                 const data = await res.json();
                 document.getElementById('stat-total').textContent = data.total;
                 document.getElementById('stat-success').textContent = data.success;
@@ -383,7 +412,11 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
             if (status) params.append('status', status);
 
             try {
-                const res = await fetch('/api/requests?' + params);
+                const res = await authFetch('/api/requests?' + params);
+                if (res.status === 401) {
+                    showAuthPrompt();
+                    return;
+                }
                 const requests = await res.json();
 
                 const list = document.getElementById('request-list');
@@ -424,7 +457,11 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
             });
 
             try {
-                const res = await fetch('/api/requests/' + id);
+                const res = await authFetch('/api/requests/' + id);
+                if (res.status === 401) {
+                    showAuthPrompt();
+                    return;
+                }
                 const detail = await res.json();
 
                 if (!detail) return;
@@ -645,6 +682,38 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
         document.getElementById('filter-method').addEventListener('change', loadRequests);
         document.getElementById('filter-status').addEventListener('change', loadRequests);
 
+        // 认证提示
+        function showAuthPrompt() {
+            const existing = document.getElementById('auth-modal');
+            if (existing) return;
+
+            const modal = document.createElement('div');
+            modal.id = 'auth-modal';
+            modal.className = 'modal show';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <h2>认证令牌</h2>
+                    <p style="color: #8b949e; margin: 10px 0;">请输入认证令牌以访问 API</p>
+                    <input type="text" id="auth-token-input" placeholder="Token" style="width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #30363d; background: #0d1117; color: #c9d1d9; border-radius: 6px;">
+                    <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                        <button onclick="document.getElementById('auth-modal').remove()" style="padding: 8px 16px; background: #21262d; border: 1px solid #30363d; color: #c9d1d9; border-radius: 6px;">取消</button>
+                        <button onclick="submitAuth()" style="padding: 8px 16px; background: #238636; border: none; color: white; border-radius: 6px;">确认</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        }
+
+        function submitAuth() {
+            const token = document.getElementById('auth-token-input').value;
+            if (token) {
+                setAuthToken(token);
+                document.getElementById('auth-modal').remove();
+                loadRequests();
+                loadStats();
+            }
+        }
+
         loadRequests();
         loadStats();
         setupAutoRefresh();
@@ -686,7 +755,11 @@ DASHBOARD_HTML = r'''<!DOCTYPE html>
             }
 
             try {
-                const res = await fetch(url, { method: 'DELETE' });
+                const res = await authFetch(url, { method: 'DELETE' });
+                if (res.status === 401) {
+                    showAuthPrompt();
+                    return;
+                }
                 const data = await res.json();
                 if (data.success) {
                     alert(data.message);

@@ -78,7 +78,9 @@ def save_config(args):
         'enable_log_file': False,
         'no_color': False,
         'connect_timeout': 60,
-        'stream_timeout': 300
+        'stream_timeout': 300,
+        'verify_ssl': False,
+        'web_auth_token': None
     }
 
     # 只保存非默认值
@@ -100,6 +102,10 @@ def save_config(args):
         config['connect_timeout'] = args.connect_timeout
     if args.stream_timeout != DEFAULTS['stream_timeout']:
         config['stream_timeout'] = args.stream_timeout
+    if args.verify_ssl != DEFAULTS['verify_ssl']:
+        config['verify_ssl'] = args.verify_ssl
+    if args.web_auth_token != DEFAULTS['web_auth_token']:
+        config['web_auth_token'] = args.web_auth_token
 
     os.makedirs(CONFIG_DIR, exist_ok=True)
     with open(CONFIG_FILE, 'w') as f:
@@ -164,6 +170,12 @@ def install_service():
 
     if 'stream_timeout' in config:
         cmd_args.append(f'--stream-timeout={config["stream_timeout"]}')
+
+    if config.get('verify_ssl'):
+        cmd_args.append('--verify-ssl')
+
+    if 'web_auth_token' in config:
+        cmd_args.append(f'--web-auth-token={config["web_auth_token"]}')
 
     # 构建 systemd 用户服务文件
     service_content = f"""[Unit]
@@ -276,6 +288,7 @@ def run_server(args):
         from dashboard.handler import DashboardHandler
         _dashboard_server = DashboardServer((args.web_host, args.web_port), DashboardHandler)
         _dashboard_server.db_manager = db_manager
+        _dashboard_server.auth_token = args.web_auth_token
         dashboard_thread = threading.Thread(target=_dashboard_server.serve_forever, daemon=True)
         dashboard_thread.start()
 
@@ -286,6 +299,7 @@ def run_server(args):
     _server.db_manager = db_manager
     _server.connect_timeout = args.connect_timeout
     _server.stream_timeout = args.stream_timeout
+    _server.verify_ssl = args.verify_ssl
 
     print(f"\n{Colors.BOLD}{Colors.CYAN}HTTP Forwarding Server{Colors.RESET}")
     print(f"{Colors.GREEN}✓{Colors.RESET} 代理服务器已启动 (PID: {os.getpid()})")
@@ -293,11 +307,19 @@ def run_server(args):
     if args.enable_log_file:
         print(f"{Colors.BLUE}→{Colors.RESET} 日志文件: {Colors.YELLOW}{args.log_file}{Colors.RESET}")
     print(f"{Colors.BLUE}→{Colors.RESET} 数据库: {Colors.YELLOW}{args.db_file}{Colors.RESET}")
+    if args.verify_ssl:
+        print(f"{Colors.BLUE}→{Colors.RESET} SSL验证: {Colors.GREEN}已启用{Colors.RESET}")
+    else:
+        print(f"{Colors.BLUE}→{Colors.RESET} SSL验证: {Colors.YELLOW}已禁用{Colors.RESET}")
 
     if not args.no_web:
         print(f"\n{Colors.BOLD}{Colors.CYAN}Dashboard{Colors.RESET}")
         print(f"{Colors.GREEN}✓{Colors.RESET} 看板服务器已启动")
         print(f"{Colors.BLUE}→{Colors.RESET} 访问地址: {Colors.YELLOW}http://{args.web_host if args.web_host != '0.0.0.0' else '127.0.0.1'}:{args.web_port}{Colors.RESET}")
+        if args.web_auth_token:
+            print(f"{Colors.BLUE}→{Colors.RESET} 认证令牌: {Colors.YELLOW}{args.web_auth_token}{Colors.RESET}")
+        else:
+            print(f"{Colors.BLUE}→{Colors.RESET} 认证: {Colors.YELLOW}无认证{Colors.RESET}")
     print(f"\n{Colors.BOLD}使用方式:{Colors.RESET}")
     print(f"  {Colors.DIM}http://127.0.0.1:{args.port}/http://example.com{Colors.RESET}")
     print(f"  {Colors.DIM}http://127.0.0.1:{args.port}/https://example.com{Colors.RESET}")
@@ -408,6 +430,16 @@ Dashboard:
         type=int,
         default=300,
         help='流式响应超时时间（秒）(默认: 300)'
+    )
+    parser.add_argument(
+        '--verify-ssl',
+        action='store_true',
+        help='启用 SSL 证书验证 (默认: 关闭，接受所有证书)'
+    )
+    parser.add_argument(
+        '--web-auth-token',
+        default=None,
+        help='Dashboard API 认证令牌 (默认: 无认证)'
     )
 
     args = parser.parse_args()
