@@ -29,6 +29,17 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
         self.request.settimeout(timeout_val)
         super().setup()
 
+    def handle(self):
+        """处理连接，捕获早期断开的错误"""
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError, socket.error):
+            # 客户端在请求完成前断开连接 - 正常情况，静默处理
+            pass
+        except Exception:
+            # 其他异常也静默处理，避免打印堆栈
+            pass
+
     def log_message(self, format, *args):
         """禁用默认日志"""
         pass
