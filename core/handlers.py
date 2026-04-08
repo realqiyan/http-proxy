@@ -135,56 +135,50 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
         total_size = 0
 
         try:
-            # SSE 事件边界处理：按行读取，遇到空行（\n\n）时表示一个完整事件结束
+            # SSE 事件边界处理：读取数据块，按 \n\n 边界切分后立即发送
+            # 注意：必须用 response.read() 而非 response.fp.readline()，
+            # 因为后者会读取原始 chunked 流（包含 chunk size 标记如 "7c\r\n"）
             buffer = b''
+            client_disconnected = False
 
-            while True:
-                # 尝试按行读取（更适合 SSE 格式）
-                try:
-                    line = response.fp.readline()
-                    if not line:
-                        # 上游关闭连接，发送剩余缓冲区内容
-                        if buffer:
-                            self.wfile.write(buffer)
-                            self.wfile.flush()
-                            if cached_body.tell() < cache_limit:
-                                remaining = cache_limit - cached_body.tell()
-                                cached_body.write(buffer[:remaining])
-                            total_size += len(buffer)
-                        break
-                except (AttributeError, ValueError):
-                    # 无法使用 readline，回退到块读取
-                    line = response.read(1024)
-                    if not line:
-                        if buffer:
-                            self.wfile.write(buffer)
-                            self.wfile.flush()
-                            if cached_body.tell() < cache_limit:
-                                remaining = cache_limit - cached_body.tell()
-                                cached_body.write(buffer[:remaining])
-                            total_size += len(buffer)
-                        break
-
-                buffer += line
-
-                # 检测 SSE 事件边界：行以 \n 结尾，且下一行也是 \n（或 buffer 以 \n\n 结尾）
-                # 或者行本身就是空行（表示事件结束）
-                if line == b'\n' or line == b'\r\n' or buffer.endswith(b'\n\n'):
-                    # 完整事件，立即发送给客户端
-                    try:
+            while not client_disconnected:
+                # 读取较大的块以提高效率，然后按事件边界切分
+                chunk = response.read(4096)
+                if not chunk:
+                    # 上游关闭连接，发送剩余缓冲区内容
+                    if buffer:
                         self.wfile.write(buffer)
                         self.wfile.flush()
+                        if cached_body.tell() < cache_limit:
+                            remaining = cache_limit - cached_body.tell()
+                            cached_body.write(buffer[:remaining])
+                        total_size += len(buffer)
+                    break
+
+                buffer += chunk
+
+                # 按 \n\n 边界切分，立即发送完整事件
+                while b'\n\n' in buffer and not client_disconnected:
+                    # 找到事件边界
+                    idx = buffer.find(b'\n\n') + 2  # 包含 \n\n
+                    event = buffer[:idx]
+                    buffer = buffer[idx:]
+
+                    # 发送完整事件
+                    try:
+                        self.wfile.write(event)
+                        self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):
-                        # 客户端断开连接 - 正常情况，不记录错误日志，直接结束流式传输
+                        # 客户端断开连接
+                        client_disconnected = True
                         break
 
                     # 缓存用于日志
                     if cached_body.tell() < cache_limit:
                         remaining = cache_limit - cached_body.tell()
-                        cached_body.write(buffer[:remaining])
+                        cached_body.write(event[:remaining])
 
-                    total_size += len(buffer)
-                    buffer = b''  # 重置缓冲区
+                    total_size += len(event)
 
         except socket.timeout:
             # 流式传输期间的超时 - 记录但不中断（可能上游暂停）
