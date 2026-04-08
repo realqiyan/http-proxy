@@ -76,7 +76,9 @@ def save_config(args):
         'web_host': '127.0.0.1',
         'web_port': 3420,
         'enable_log_file': False,
-        'no_color': False
+        'no_color': False,
+        'connect_timeout': 60,
+        'stream_timeout': 300
     }
 
     # 只保存非默认值
@@ -94,6 +96,10 @@ def save_config(args):
         config['enable_log_file'] = args.enable_log_file
     if args.no_color != DEFAULTS['no_color']:
         config['no_color'] = args.no_color
+    if args.connect_timeout != DEFAULTS['connect_timeout']:
+        config['connect_timeout'] = args.connect_timeout
+    if args.stream_timeout != DEFAULTS['stream_timeout']:
+        config['stream_timeout'] = args.stream_timeout
 
     os.makedirs(CONFIG_DIR, exist_ok=True)
     with open(CONFIG_FILE, 'w') as f:
@@ -152,6 +158,12 @@ def install_service():
             cmd_args.append(f'--web-host={config["web_host"]}')
         if 'web_port' in config:
             cmd_args.append(f'--web-port={config["web_port"]}')
+
+    if 'connect_timeout' in config:
+        cmd_args.append(f'--connect-timeout={config["connect_timeout"]}')
+
+    if 'stream_timeout' in config:
+        cmd_args.append(f'--stream-timeout={config["stream_timeout"]}')
 
     # 构建 systemd 用户服务文件
     service_content = f"""[Unit]
@@ -272,6 +284,8 @@ def run_server(args):
     _server.log_file = args.log_file
     _server.logger = logger
     _server.db_manager = db_manager
+    _server.connect_timeout = args.connect_timeout
+    _server.stream_timeout = args.stream_timeout
 
     print(f"\n{Colors.BOLD}{Colors.CYAN}HTTP Forwarding Server{Colors.RESET}")
     print(f"{Colors.GREEN}✓{Colors.RESET} 代理服务器已启动 (PID: {os.getpid()})")
@@ -382,6 +396,18 @@ Dashboard:
         '--db-file',
         default=None,
         help='数据库文件路径 (默认: ~/.http-proxy/data/proxy.db)'
+    )
+    parser.add_argument(
+        '--connect-timeout',
+        type=int,
+        default=60,
+        help='连接超时时间（秒）(默认: 60)'
+    )
+    parser.add_argument(
+        '--stream-timeout',
+        type=int,
+        default=300,
+        help='流式响应超时时间（秒）(默认: 300)'
     )
 
     args = parser.parse_args()

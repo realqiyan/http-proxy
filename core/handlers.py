@@ -20,11 +20,13 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
     """HTTP 转发请求处理器"""
 
     protocol_version = 'HTTP/1.1'
-    timeout = 60  # 连接超时时间
+    timeout = 60  # 默认连接超时时间（可被 server.connect_timeout 覆盖）
 
     def setup(self):
         """初始化连接"""
-        self.request.settimeout(self.timeout)
+        # 使用服务器配置的超时时间，如果没有配置则使用默认值
+        timeout_val = getattr(self.server, 'connect_timeout', self.timeout)
+        self.request.settimeout(timeout_val)
         super().setup()
 
     def log_message(self, format, *args):
@@ -63,24 +65,49 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
         return scheme, host, port, target_path
 
     def _is_streaming_response(self, headers: Dict[str, str]) -> bool:
-        """检测是否为流式响应"""
+        """检测是否为流式响应
+
+        注意：text/event-stream 的检测独立于 Transfer-Encoding 检查，
+        因为 SSE 规范要求服务器必须使用流式传输，检测 Content-Type 即可。
+
+        隐式流式检测：当响应使用 chunked 编码且没有 Content-Length 时，
+        排除常见的非流式 Content-Type 后，视为流式响应。
+        """
         content_type = headers.get('Content-Type', '').lower()
         transfer_encoding = headers.get('Transfer-Encoding', '').lower()
+        content_length = headers.get('Content-Length')
 
-        # SSE (Server-Sent Events)
+        # SSE (Server-Sent Events) - 仅检测 Content-Type，无需 Transfer-Encoding
         if 'text/event-stream' in content_type:
             return True
 
         # Chunked encoding 且可能是流式
         if 'chunked' in transfer_encoding:
+            # 已知的流式 Content-Type
             streaming_types = ['text/event-stream', 'application/x-ndjson', 'application/stream+json']
             if any(t in content_type for t in streaming_types):
                 return True
 
+            # 隐式流式检测：chunked + 无 Content-Length + 非常见静态内容类型
+            # 排除常见的非流式类型以减少误判
+            if content_length is None:
+                non_streaming_types = [
+                    'text/html', 'application/json', 'application/javascript',
+                    'text/css', 'image/', 'application/pdf', 'application/xml'
+                ]
+                if not any(t in content_type for t in non_streaming_types):
+                    return True
+
         return False
 
     def _handle_streaming_response(self, response, status: int, reason: str, headers: list) -> bytes:
-        """处理流式响应，边读边转发，同时缓存部分内容用于日志"""
+        """处理流式响应，边读边转发，同时缓存部分内容用于日志
+
+        流式响应期间使用扩展的超时时间（stream_timeout），避免长对话生成中断。
+        """
+        # 获取流式超时配置
+        stream_timeout = getattr(self.server, 'stream_timeout', 300)
+
         # 发送响应头
         self.send_response(status, reason)
 
@@ -90,6 +117,18 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
 
         self.end_headers()
 
+        # 设置客户端 socket 为阻塞模式，避免超时中断
+        original_timeout = self.request.gettimeout()
+        self.request.settimeout(None)
+
+        # 设置上游 socket 超时
+        # HTTPResponse.read() 没有超时参数，需要访问底层 socket
+        try:
+            if hasattr(response, 'fp') and hasattr(response.fp, '_fp'):
+                response.fp._fp.settimeout(stream_timeout)
+        except (AttributeError, socket.error):
+            pass  # 无法访问底层 socket，使用默认行为
+
         # 缓存前 64KB 用于日志
         cached_body = BytesIO()
         cache_limit = 65536
@@ -98,7 +137,7 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
         try:
             # 逐块读取并转发
             while True:
-                chunk = response.read(8192)
+                chunk = response.read(4096)  # 使用较小的块大小减少 SSE 消息分割
                 if not chunk:
                     break
 
@@ -107,6 +146,7 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(chunk)
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
+                    # 客户端断开连接 - 正常情况，不记录错误日志，直接结束流式传输
                     break
 
                 # 缓存用于日志
@@ -116,8 +156,19 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
 
                 total_size += len(chunk)
 
+        except socket.timeout:
+            # 流式传输期间的超时 - 记录但不中断（可能上游暂停）
+            print(f"{Colors.YELLOW}[STREAMING] Socket timeout after {stream_timeout}s{Colors.RESET}")
         except Exception as e:
             print(f"{Colors.YELLOW}[STREAMING] Error: {e}{Colors.RESET}")
+
+        finally:
+            # 恢复原始超时设置
+            if original_timeout is not None:
+                try:
+                    self.request.settimeout(original_timeout)
+                except:
+                    pass
 
         # 返回缓存的响应体（可能被截断）
         result = cached_body.getvalue()
@@ -154,6 +205,7 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
             max_retries = 3
             retry_count = 0
             last_error = None
+            connect_timeout = getattr(self.server, 'connect_timeout', 60)
 
             while retry_count < max_retries:
                 try:
@@ -161,9 +213,9 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
                         context = ssl.create_default_context()
                         context.check_hostname = False
                         context.verify_mode = ssl.CERT_NONE
-                        conn = http.client.HTTPSConnection(host, port, context=context, timeout=60)
+                        conn = http.client.HTTPSConnection(host, port, context=context, timeout=connect_timeout)
                     else:
-                        conn = http.client.HTTPConnection(host, port, timeout=60)
+                        conn = http.client.HTTPConnection(host, port, timeout=connect_timeout)
 
                     # 准备转发的请求头
                     forward_headers = {}
