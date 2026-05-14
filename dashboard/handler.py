@@ -85,7 +85,10 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         from urllib.parse import parse_qs
         params = parse_qs(self.path.split('?')[1] if '?' in self.path else '')
 
-        limit = int(params.get('limit', [100])[0])
+        try:
+            limit = min(int(params.get('limit', [100])[0]), 10000)
+        except (ValueError, TypeError):
+            limit = 100
         method = params.get('method', [None])[0]
         status = params.get('status', [None])[0]
         search = params.get('search', [None])[0]
@@ -102,6 +105,14 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
     def _handle_api_request_detail(self, request_id: str):
         db = self.server.db_manager
         detail = db.get_request_detail(request_id)
+
+        if detail is None:
+            self.send_response(404)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'Request not found'}).encode('utf-8'))
+            return
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')

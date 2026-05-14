@@ -7,6 +7,7 @@ import socket
 import re
 import time
 import traceback
+import ipaddress
 from io import BytesIO
 from urllib.parse import urlparse
 from datetime import datetime
@@ -17,8 +18,25 @@ from utils.format import format_size, format_duration
 
 
 # 阻止访问内部地址，防止 SSRF 攻击
-BLOCKED_HOSTS = ['localhost', '127.0.0.1', '169.254.169.254', '::1', '0.0.0.0']
+BLOCKED_HOSTS = ['localhost', '169.254.169.254']
 BLOCKED_SUFFIXES = ['.internal', '.local', '.localhost']
+
+# 请求/响应体大小限制
+MAX_REQUEST_BODY_SIZE = 100 * 1024 * 1024   # 100MB
+MAX_RESPONSE_BODY_SIZE = 200 * 1024 * 1024  # 200MB
+
+
+def _is_private_ip(host: str) -> bool:
+    """检查主机名是否解析为内部/私有 IP 地址（防止 SSRF）"""
+    try:
+        addrs = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        for family, _, _, _, sockaddr in addrs:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return True
+    except (socket.gaierror, ValueError):
+        pass
+    return False
 
 
 class ForwardingHandler(http.server.BaseHTTPRequestHandler):
@@ -76,8 +94,7 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
         target_path = parsed.path or '/'
         if parsed.query:
             target_path += '?' + parsed.query
-        if parsed.fragment:
-            target_path += '#' + parsed.fragment
+        # URL fragment 不转发给上游（HTTP 规范：fragment 是客户端行为）
 
         return scheme, host, port, target_path
 
@@ -144,9 +161,9 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.headers_sent = True  # 标记已发送响应头
 
-        # 设置客户端 socket 为阻塞模式，避免超时中断
+        # 设置客户端 socket 超时（使用流式超时，防止慢客户端永久阻塞线程）
         original_timeout = self.request.gettimeout()
-        self.request.settimeout(None)
+        self.request.settimeout(stream_timeout)
 
         # 设置上游 socket 超时
         try:
@@ -213,7 +230,7 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
                                 decoded_chunk = self._decode_chunked_sample(chunk, cached_body.tell())
                                 remaining = cache_limit - cached_body.tell()
                                 cached_body.write(decoded_chunk[:remaining])
-                            except:
+                            except Exception:
                                 # 解码失败，直接存储原始数据
                                 remaining = cache_limit - cached_body.tell()
                                 cached_body.write(chunk[:remaining])
@@ -223,6 +240,7 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
                     # 无法访问原始 socket，回退到普通读取
                     # 但需要重新编码为 chunked 格式发送给客户端
                     buffer = b''
+                    max_buffer_size = 1024 * 1024  # 1MB buffer limit
                     while not client_disconnected:
                         chunk = response.read(4096)
                         if not chunk:
@@ -241,6 +259,19 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
                             break
 
                         buffer += chunk
+
+                        # buffer 过大时强制刷新（防止无分隔符时无限增长）
+                        if len(buffer) > max_buffer_size:
+                            chunk_data = self._encode_chunk(buffer)
+                            try:
+                                self.wfile.write(chunk_data)
+                                self.wfile.flush()
+                            except (BrokenPipeError, ConnectionResetError):
+                                client_disconnected = True
+                                stream_failed = True
+                                break
+                            total_size += len(chunk_data)
+                            buffer = b''
 
                         # 按事件边界切分，用 chunked 格式发送
                         delimiter = b'\n\n' if 'text/event-stream' in content_type else b'\n'
@@ -273,6 +304,7 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
                 # SSE 使用 \n\n，NDJSON 使用 \n
                 delimiter = b'\n\n' if 'text/event-stream' in content_type else b'\n'
                 buffer = b''
+                max_buffer_size = 1024 * 1024  # 1MB buffer limit
 
                 while not client_disconnected:
                     chunk = response.read(4096)
@@ -288,6 +320,18 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
                         break
 
                     buffer += chunk
+
+                    # buffer 过大时强制刷新（防止无分隔符时无限增长）
+                    if len(buffer) > max_buffer_size:
+                        try:
+                            self.wfile.write(buffer)
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            client_disconnected = True
+                            stream_failed = True
+                            break
+                        total_size += len(buffer)
+                        buffer = b''
 
                     # 按事件边界切分，立即发送完整事件
                     while delimiter in buffer and not client_disconnected:
@@ -321,11 +365,17 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
             if original_timeout is not None:
                 try:
                     self.request.settimeout(original_timeout)
-                except:
+                except Exception:
                     pass
+            # 关闭上游响应，释放连接资源
+            try:
+                response.close()
+            except Exception:
+                pass
 
         # 返回缓存的响应体（可能被截断）
         result = cached_body.getvalue()
+        cached_body.close()
         if total_size > cache_limit or stream_failed:
             status_text = 'FAILED' if stream_failed else 'complete'
             result += f"\n\n... (truncated, total {format_size(total_size)}, {status_text})".encode('utf-8')
@@ -387,6 +437,9 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
         if any(host_lower.endswith(suffix) for suffix in BLOCKED_SUFFIXES):
             self.send_error(403, 'Forbidden: Internal addresses not allowed')
             return
+        if _is_private_ip(host):
+            self.send_error(403, 'Forbidden: Internal addresses not allowed')
+            return
         full_url = f"{scheme}://{host}:{port}{target_path}"
 
         conn = None
@@ -406,6 +459,9 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
             if content_length < 0:
                 self.send_error(400, 'Bad Request: Negative Content-Length')
                 return
+            if content_length > MAX_REQUEST_BODY_SIZE:
+                self.send_error(413, f'Request Entity Too Large: max {MAX_REQUEST_BODY_SIZE // (1024*1024)}MB')
+                return
             request_body = self.rfile.read(content_length) if content_length > 0 else b''
 
             # 创建目标连接（增加超时和重试）
@@ -417,14 +473,19 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
             while retry_count < max_retries:
                 try:
                     if scheme == 'https':
-                        context = ssl.create_default_context()
+                        # 缓存 SSL context，避免每个请求都创建新的
                         verify_ssl = getattr(self.server, 'verify_ssl', False)
-                        if verify_ssl:
-                            context.check_hostname = True
-                            context.verify_mode = ssl.CERT_REQUIRED
-                        else:
-                            context.check_hostname = False
-                            context.verify_mode = ssl.CERT_NONE
+                        cache_key = '_ssl_context_verified' if verify_ssl else '_ssl_context_unverified'
+                        context = getattr(self.server, cache_key, None)
+                        if context is None:
+                            context = ssl.create_default_context()
+                            if verify_ssl:
+                                context.check_hostname = True
+                                context.verify_mode = ssl.CERT_REQUIRED
+                            else:
+                                context.check_hostname = False
+                                context.verify_mode = ssl.CERT_NONE
+                            setattr(self.server, cache_key, context)
                         conn = http.client.HTTPSConnection(host, port, context=context, timeout=connect_timeout)
                     else:
                         conn = http.client.HTTPConnection(host, port, timeout=connect_timeout)
@@ -452,7 +513,7 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
                     if conn:
                         try:
                             conn.close()
-                        except:
+                        except Exception:
                             pass
                     if retry_count < max_retries:
                         time.sleep(0.5 * retry_count)
@@ -474,8 +535,25 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
                 # 流式响应处理
                 response_body = self._handle_streaming_response(response, response_status, response_reason, response_headers)
             else:
-                # 普通响应：读取完整响应体
-                response_body = response.read()
+                # 普通响应：读取完整响应体（限制大小防止 OOM）
+                content_length_str = headers_dict.get('Content-Length')
+                if content_length_str:
+                    try:
+                        resp_cl = int(content_length_str)
+                        if resp_cl > MAX_RESPONSE_BODY_SIZE:
+                            self.send_error(502, f'Bad Gateway: Response too large ({resp_cl} bytes)')
+                            return
+                    except ValueError:
+                        pass
+                response_body = b''
+                while True:
+                    chunk = response.read(65536)
+                    if not chunk:
+                        break
+                    response_body += chunk
+                    if len(response_body) > MAX_RESPONSE_BODY_SIZE:
+                        self.send_error(502, f'Bad Gateway: Response exceeded {MAX_RESPONSE_BODY_SIZE // (1024*1024)}MB limit')
+                        return
 
                 # ===== 发送响应给客户端 =====
                 self.send_response(response_status, response_reason)
@@ -516,34 +594,34 @@ class ForwardingHandler(http.server.BaseHTTPRequestHandler):
             if not getattr(self, 'headers_sent', False):
                 try:
                     self.send_error(502, f'Bad Gateway: {e}')
-                except:
+                except Exception:
                     pass
         except socket.timeout as e:
             self._log_error(method, full_url, f'Connection timeout: {e}')
             if not getattr(self, 'headers_sent', False):
                 try:
                     self.send_error(504, f'Gateway Timeout: {e}')
-                except:
+                except Exception:
                     pass
         except (socket.error, ConnectionError, OSError) as e:
             self._log_error(method, full_url, f'Connection error: {e}')
             if not getattr(self, 'headers_sent', False):
                 try:
                     self.send_error(502, f'Bad Gateway: Connection failed - {e}')
-                except:
+                except Exception:
                     pass
         except Exception as e:
             self._log_error(method, full_url, f'{e}\n{traceback.format_exc()}')
             if not getattr(self, 'headers_sent', False):
                 try:
                     self.send_error(500, f'Internal Error: {e}')
-                except:
+                except Exception:
                     pass
         finally:
             if conn:
                 try:
                     conn.close()
-                except:
+                except Exception:
                     pass
 
     def _log_terminal(self, method: str, url: str, status: int, size: int, duration: float, is_streaming: bool = False):

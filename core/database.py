@@ -17,6 +17,12 @@ class DatabaseManager:
         self.db_path = db_path
         self.lock = threading.Lock()
         self._init_db()
+        self._auto_cleanup()
+
+    def _connect(self):
+        """创建带 busy_timeout 的数据库连接"""
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        return conn
 
     def _init_db(self):
         """初始化数据库表结构"""
@@ -24,7 +30,7 @@ class DatabaseManager:
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
             # 主请求表
             cursor.execute('''
@@ -63,6 +69,22 @@ class DatabaseManager:
 
             conn.commit()
 
+    def _auto_cleanup(self, max_days: int = 7):
+        """启动时自动清理超过 max_days 天的旧数据"""
+        try:
+            cutoff = (datetime.now() - timedelta(days=max_days)).isoformat()
+            with self.lock:
+                with self._connect() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT COUNT(*) FROM requests WHERE timestamp < ?', (cutoff,))
+                    count = cursor.fetchone()[0]
+                    if count > 0:
+                        cursor.execute('DELETE FROM request_details WHERE request_id IN (SELECT id FROM requests WHERE timestamp < ?)', (cutoff,))
+                        cursor.execute('DELETE FROM requests WHERE timestamp < ?', (cutoff,))
+                        conn.commit()
+        except Exception:
+            pass  # 清理失败不影响启动
+
     def save_request(
         self,
         method: str,
@@ -89,7 +111,7 @@ class DatabaseManager:
             path += '?' + parsed.query
 
         with self.lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # 保存主记录
@@ -144,7 +166,7 @@ class DatabaseManager:
     def get_requests(self, limit: int = 100, offset: int = 0,
                      method: str = None, status: str = None, search: str = None) -> List[Dict]:
         """获取请求列表"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -179,7 +201,7 @@ class DatabaseManager:
 
     def get_request_detail(self, request_id: str) -> Optional[Dict]:
         """获取请求详情"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -209,7 +231,7 @@ class DatabaseManager:
             try:
                 compressed = base64.b64decode(body_str[5:].encode('ascii'))
                 return gzip.decompress(compressed).decode('utf-8')
-            except:
+            except Exception:
                 return body_str
         elif body_str.startswith('BASE64:'):
             import base64
@@ -219,7 +241,7 @@ class DatabaseManager:
 
     def get_stats(self) -> Dict:
         """获取统计信息"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
 
             cursor.execute('SELECT COUNT(*) FROM requests')
@@ -246,7 +268,7 @@ class DatabaseManager:
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
 
         with self.lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute('DELETE FROM request_details WHERE request_id IN (SELECT id FROM requests WHERE timestamp < ?)', (cutoff,))
                 cursor.execute('DELETE FROM requests WHERE timestamp < ?', (cutoff,))
@@ -264,7 +286,7 @@ class DatabaseManager:
             删除的记录数
         """
         with self.lock:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # 处理日期格式

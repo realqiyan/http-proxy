@@ -41,6 +41,11 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     logger = None
     db_manager = None
 
+    def graceful_shutdown(self, timeout=5):
+        """优雅关闭：先停止接受新连接，再等待活跃连接完成"""
+        self._BaseServer__shutdown_request = True
+        self._BaseServer__is_shut_down.wait(timeout)
+
 
 # 全局变量用于信号处理
 _server = None
@@ -339,10 +344,12 @@ def run_server(args):
     except KeyboardInterrupt:
         pass
     finally:
-        print(f"\n{Colors.YELLOW}服务已关闭{Colors.RESET}")
+        print(f"\n{Colors.YELLOW}正在关闭服务...{Colors.RESET}")
+        _server.graceful_shutdown(timeout=5)
         _server.server_close()
         if _dashboard_server:
             _dashboard_server.server_close()
+        print(f"{Colors.GREEN}服务已关闭{Colors.RESET}")
 
 
 def main():
