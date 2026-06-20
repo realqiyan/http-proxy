@@ -1,6 +1,8 @@
 """格式化工具函数"""
 
+import gzip
 import json
+import zlib
 
 
 def format_size(size: int) -> str:
@@ -38,6 +40,37 @@ def is_text_content(content_type: str) -> bool:
     return False
 
 
+def _try_decompress(data: bytes) -> str:
+    """尝试解压缩并解码为文本，失败返回 None"""
+    # gzip: magic bytes 1f 8b
+    if data[:2] == b'\x1f\x8b':
+        try:
+            return gzip.decompress(data).decode('utf-8')
+        except Exception:
+            pass
+
+    # brotli
+    try:
+        import brotli
+        return brotli.decompress(data).decode('utf-8')
+    except Exception:
+        pass
+
+    # deflate (raw)
+    try:
+        return zlib.decompress(data, -zlib.MAX_WBITS).decode('utf-8')
+    except Exception:
+        pass
+
+    # deflate (wrapped)
+    try:
+        return zlib.decompress(data).decode('utf-8')
+    except Exception:
+        pass
+
+    return None
+
+
 def format_body(body: bytes, content_type: str = None) -> str:
     """格式化 body 内容（完整保留，不截断）"""
     if not body:
@@ -52,15 +85,19 @@ def format_body(body: bytes, content_type: str = None) -> str:
     # 尝试解码为文本（完整保留）
     try:
         text = body.decode('utf-8')
-
-        # 尝试格式化 JSON
-        if content_type and 'json' in content_type.lower():
-            try:
-                obj = json.loads(text)
-                text = json.dumps(obj, indent=2, ensure_ascii=False)
-            except:
-                pass
-
-        return text
     except UnicodeDecodeError:
+        # UTF-8 解码失败，尝试解压缩后再解码
+        text = _try_decompress(body)
+
+    if text is None:
         return f"({format_size(size)} binary data)"
+
+    # 尝试格式化 JSON
+    if content_type and 'json' in content_type.lower():
+        try:
+            obj = json.loads(text)
+            text = json.dumps(obj, indent=2, ensure_ascii=False)
+        except:
+            pass
+
+    return text

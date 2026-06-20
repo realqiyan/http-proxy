@@ -152,16 +152,56 @@ class DatabaseManager:
         # 尝试解码为文本
         try:
             text = body.decode('utf-8')
+        except UnicodeDecodeError:
+            # UTF-8 解码失败，尝试解压缩后再解码
+            text = self._try_decompress(body)
+
+        if text is not None:
             # 如果太大，尝试压缩
             if len(text) > 100000:  # 100KB 以上压缩
                 import base64
                 compressed = gzip.compress(text.encode('utf-8'))
                 return 'GZIP:' + base64.b64encode(compressed).decode('ascii')
             return text
-        except UnicodeDecodeError:
-            # 二进制数据用 base64
-            import base64
-            return 'BASE64:' + base64.b64encode(body).decode('ascii')
+
+        # 二进制数据用 base64
+        import base64
+        return 'BASE64:' + base64.b64encode(body).decode('ascii')
+
+    def _try_decompress(self, data: bytes) -> str:
+        """尝试解压缩并解码为文本，失败返回 None"""
+        # gzip: magic bytes 1f 8b
+        if data[:2] == b'\x1f\x8b':
+            try:
+                return gzip.decompress(data).decode('utf-8')
+            except Exception:
+                pass
+
+        # brotli
+        try:
+            import brotli
+            decompressed = brotli.decompress(data)
+            return decompressed.decode('utf-8')
+        except Exception:
+            pass
+
+        # deflate (raw)
+        try:
+            import zlib
+            decompressed = zlib.decompress(data, -zlib.MAX_WBITS)
+            return decompressed.decode('utf-8')
+        except Exception:
+            pass
+
+        # deflate (wrapped)
+        try:
+            import zlib
+            decompressed = zlib.decompress(data)
+            return decompressed.decode('utf-8')
+        except Exception:
+            pass
+
+        return None
 
     def get_requests(self, limit: int = 100, offset: int = 0,
                      method: str = None, status: str = None, search: str = None) -> List[Dict]:
