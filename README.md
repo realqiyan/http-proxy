@@ -39,6 +39,9 @@ Dashboard 自动识别并脱敏敏感请求头：
 git clone <repo-url>
 cd http-proxy
 
+# 安装依赖
+pip install -r requirements.txt
+
 # 启动服务（后台运行，自动重启）
 python proxy_server.py
 
@@ -99,10 +102,13 @@ sudo python proxy_server.py uninstall
 安装后服务会自动启动并设置开机自启：
 
 ```bash
-# 1. 先启动服务（保存配置）
+# 1. 安装依赖（需在系统 Python 中安装，systemd 服务会以系统 Python 运行）
+sudo pip install -r requirements.txt
+
+# 2. 先启动服务（保存配置）
 python proxy_server.py
 
-# 2. 安装为系统服务
+# 3. 安装为系统服务
 sudo python proxy_server.py install
 
 # 服务管理
@@ -378,7 +384,8 @@ http-proxy/
 ## 技术栈
 
 - **语言**：Python 3
-- **标准库**：`http.server`、`http.client`、`socketserver`、`threading`、`ssl`、`sqlite3`
+- **标准库**：`http.server`、`socketserver`、`threading`、`sqlite3`
+- **第三方库**：`requests`（HTTP 转发，原生区分连接/读超时、流式与字节保真）
 - **并发模型**：ThreadingMixIn 多线程
 - **存储**：SQLite + GZIP 压缩
 

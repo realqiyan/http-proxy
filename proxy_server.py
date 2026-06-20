@@ -306,6 +306,15 @@ def run_server(args):
     _server.stream_timeout = args.stream_timeout
     _server.verify_ssl = args.verify_ssl
 
+    # verify_ssl 关闭时静默 urllib3 的 InsecureRequestWarning（与原 http.client
+    # 使用 CERT_NONE 的行为一致，避免每次请求打印告警）
+    if not args.verify_ssl:
+        try:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except ImportError:
+            pass
+
     print(f"\n{Colors.BOLD}{Colors.CYAN}HTTP Forwarding Server{Colors.RESET}")
     print(f"{Colors.GREEN}✓{Colors.RESET} 代理服务器已启动 (PID: {os.getpid()})")
     print(f"{Colors.BLUE}→{Colors.RESET} 代理端口: {Colors.YELLOW}{args.port}{Colors.RESET}")
@@ -482,6 +491,15 @@ Dashboard:
     else:
         # 保存配置
         save_config(args)
+
+        # 启动期依赖检查：转发逻辑依赖 requests（仅运行服务器时需要，
+        # install/uninstall 等子命令不依赖）
+        try:
+            import requests  # noqa: F401
+        except ImportError:
+            print(f"{Colors.RED}[ERROR]{Colors.RESET} 缺少依赖 'requests'，请先安装：")
+            print(f"  {Colors.YELLOW}pip install -r requirements.txt{Colors.RESET}")
+            sys.exit(1)
 
         # 设置信号处理
         signal.signal(signal.SIGTERM, signal_handler)
