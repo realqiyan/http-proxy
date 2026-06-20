@@ -30,7 +30,9 @@ echo   或运行: winget install Python.Python.3
 exit /b 1
 
 :found_python
-echo [1/3] 使用 Python: %PYTHON% (%PYTHON% --version 2^>^&1)
+for /f "tokens=*" %%v in ('%PYTHON% --version 2^>^&1') do (
+    echo [1/3] 使用 Python: %PYTHON% ^(%%v^)
+)
 
 REM ---- 创建虚拟环境（若不存在）----
 if not exist ".venv\Scripts\python.exe" (
