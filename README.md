@@ -56,6 +56,26 @@ python proxy_server.py stop
 - 代理服务：`http://127.0.0.1:12345`
 - Dashboard：`http://127.0.0.1:3420`
 
+### 一键启动（推荐，跨平台）
+
+仓库提供启动脚本，自动创建虚拟环境、安装依赖并前台启动服务：
+
+```bash
+# macOS / Linux
+./start.sh
+
+# 指定端口等参数透传给 proxy_server.py
+./start.sh -p 8080
+```
+
+```bat
+:: Windows
+start.bat
+start.bat -p 8080
+```
+
+脚本会在仓库根目录创建 `.venv` 虚拟环境并安装 `requirements.txt` 中的依赖，随后前台运行服务（Ctrl+C 退出）。
+
 ### 使用代理
 
 在目标 URL 前添加代理地址：
